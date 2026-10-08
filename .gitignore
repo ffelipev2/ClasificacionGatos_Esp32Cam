@@ -1,0 +1,5 @@
+.pio/
+.build/
+firmware/ESP32CAMGatos/config.local.h
+*.log
+
