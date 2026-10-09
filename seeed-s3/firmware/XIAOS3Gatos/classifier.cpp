@@ -178,4 +178,3 @@ Label Stabilizer::update(Label label) {
 }
 void Stabilizer::reset() { candidate_ = Label::Unknown; hits_ = 0; }
 }  // namespace cats
-

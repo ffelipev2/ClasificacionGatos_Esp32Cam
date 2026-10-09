@@ -1,17 +1,15 @@
 # Verificación del proyecto
 
-Fecha: 8 de octubre de 2026.
+Actualización: 9 de octubre de 2026. Firmware `2.0-calibracion`.
 
-- **Clasificador:** 52 comprobaciones nativas aprobadas, compiladas con Visual C++ en C++14. Incluyen variaciones de brillo y tono, fondo gris vacío, colores desconocidos, calibración incompleta y cambio de resultados sin conservar una clase anterior.
-- **Firmware completo:** compilado y enlazado para ESP32 con el SDK instalado Arduino-ESP32 3.3.2 y su compilador Xtensa GCC 14.2.0. Se usaron las opciones oficiales para AI Thinker, QIO de 80 MHz, PSRAM y partición Huge APP. Se compilaron la aplicación y 86 archivos del núcleo, bibliotecas y clasificador.
-- **Aplicación:** 1.099.264 bytes de imagen binaria; cabe en la partición de aplicación de 3 MB.
-- **RAM interna estática:** 74.988 bytes para las secciones de datos y BSS; no incluye memoria dinámica ni los buffers de cámara. La conversión de imagen y la copia JPEG usan PSRAM.
-- **Binario integrado:** 4.194.304 bytes. Checksum y hash de imagen de aplicación válidos según esptool 5.1.0. El SHA-256 del archivo integrado está en `dist/SHA256SUMS.txt`.
-- **Panel:** JavaScript comprobado sintácticamente. No había un navegador conectado para verificar su presentación visual.
+- **Clasificador y registro:** 85 comprobaciones nativas aprobadas con Visual C++ en C++14, sin advertencias. Incluyen naranja pálido, naranja brillante, tonos con brillo similar al gris, conservación de capturas buenas entre capturas descartadas, fin de sesión sin muestras y éxito en el último intento permitido. También cubren fondo vacío, colores desconocidos y estabilidad temporal.
+- **Firmware:** aplicación y clasificador recompilados y enlazados con el núcleo y bibliotecas Arduino-ESP32 3.3.2, usando Xtensa GCC 14.2.0 y las opciones oficiales para AI Thinker, PSRAM, QIO de 80 MHz y partición Huge APP.
+- **Aplicación:** 1.101.424 bytes. La imagen integrada ocupa 4.194.304 bytes. Esptool 5.1.0 confirmó checksum y hash válidos de la aplicación; los SHA-256 de ambos archivos están en `dist/SHA256SUMS.txt`.
+- **Panel:** JavaScript válido sintácticamente; muestra capturas válidas y el motivo de espera. Presentación visual no verificada en navegador.
+- **Migración:** el formato persistido mantiene el mismo tamaño. La versión 2 acepta una calibración de versión 1 válida, conserva el fondo y los ajustes y borra los perfiles de pelaje que usaban el histograma antiguo. Tras cargar solo la aplicación y reiniciar, la placa recuperó la calibración desde NVS; el área de primer plano distinta de cero confirma que dispone del fondo guardado.
 
-Arduino CLI encontró una restricción de acceso al resolver directorios de paquetes en este entorno. La compilación se completó invocando directamente el compilador y las opciones de las recetas oficiales del SDK, con una copia temporal dentro del proyecto. No se modificó la instalación de Arduino.
+La primera versión sí se cargó en COM17: esptool verificó la escritura, y se observaron la red local y 18 capturas de cámara consecutivas tras el reinicio. Ese registro corresponde a la versión 1, no valida físicamente la versión 2.
 
-Posteriormente se cargó el firmware en la ESP32 conectada a COM17, con flash de 4 MB. Esptool verificó el hash de los datos escritos. Tras reiniciarla, el registro serie confirmó la creación de la red `ESP32CAM-Gatos`, el panel en `http://192.168.4.1` y 18 capturas analizadas consecutivas durante la observación, sin errores de cámara ni reinicios repetidos.
+La placa se reconectó durante el trabajo. Se respaldaron 20.480 bytes de NVS en `.build/backups/2026-10-09-COM17-nvs-v1.bin` y se cargó la aplicación en `0x10000`, conservando la memoria NVS. Esptool verificó el hash de los datos escritos.
 
-La placa está en estado `sin_calibrar`, pendiente de registrar el fondo y ambos gatos. No se comprobó el acceso HTTP desde un teléfono, la persistencia de una calibración ni la precisión con gatos reales. La alternativa PlatformIO no se compiló en este entorno. Detalles en `carga.md`.
-
+Después del reinicio, se observó `Firmware: 2.0-calibracion`, la red local, el mensaje de recuperación de calibración y 18 capturas consecutivas durante diez segundos, sin errores de cámara ni reinicios repetidos. Los nuevos perfiles naranja y gris están pendientes de que el usuario los registre con sus gatos. La precisión real requiere validar el montaje. No se compiló la alternativa PlatformIO.

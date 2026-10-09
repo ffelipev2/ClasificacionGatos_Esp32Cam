@@ -15,7 +15,7 @@
 using cats::Label;
 constexpr int FRAME_W = 320, FRAME_H = 240;
 constexpr uint32_t STATE_MAGIC = 0x43415432;
-constexpr uint32_t STATE_VERSION = 1;
+constexpr uint32_t STATE_VERSION = 2;
 struct SavedState {
   uint32_t magic = STATE_MAGIC, version = STATE_VERSION;
   cats::Options options;
@@ -26,7 +26,8 @@ struct Learning {
   bool active = false;
   bool background = false;
   Label label = Label::Unknown;
-  unsigned count = 0;
+  cats::SamplingProgress progress;
+  unsigned long started = 0;
   cats::Prototype candidate;
   uint16_t sums[cats::PIXELS][3] = {};
 };
@@ -61,13 +62,21 @@ bool saveState() {
 void loadState() {
   storageReady = preferences.begin("cat-colors", false);
   if (!storageReady) { message = "No se pudo abrir la memoria. La calibración no persistirá."; return; }
-  if (preferences.getBytesLength("state") != sizeof(state)) return;
+  if (!preferences.isKey("state") || preferences.getBytesLength("state") != sizeof(state)) return;
   preferences.getBytes("state", &state, sizeof(state));
-  if (state.magic != STATE_MAGIC || state.version != STATE_VERSION ||
+  if (state.magic != STATE_MAGIC || (state.version != 1 && state.version != STATE_VERSION) ||
       checksum(state) != state.checksum || !cats::validOptions(state.options) ||
       !cats::validModel(state.model)) {
     state = SavedState{};
     message = "Calibración inválida; registra el fondo y ambos gatos.";
+  } else if (state.version == 1) {
+    // El histograma nuevo necesita nuevas muestras de los gatos.
+    // Conservar el fondo y la zona al actualizar solo la aplicación.
+    memset(&state.model.orange, 0, sizeof(state.model.orange));
+    memset(&state.model.gray, 0, sizeof(state.model.gray));
+    state.version = STATE_VERSION;
+    message = saveState() ? "Versión actualizada. Fondo conservado; registra ambos gatos otra vez." :
+                           "Fondo conservado en RAM; registra ambos gatos para guardar la actualización.";
   } else message = "Calibración recuperada de la memoria.";
 }
 void clearModel() {
@@ -170,7 +179,23 @@ void cancelLearning(const String &reason) {
 }
 void advanceLearning() {
   if (!learning.active) return;
-  if (analysis.brightness < 0.10f) { cancelLearning("Registro cancelado: hay muy poca luz."); return; }
+  const cats::TrainingIssue issue = learning.background ?
+    (analysis.brightness < 0.10f ? cats::TrainingIssue::LowLight : cats::TrainingIssue::Ready) :
+    cats::trainingIssue(analysis, state.options);
+  const cats::SampleState step = learning.progress.update(issue == cats::TrainingIssue::Ready);
+  if (step == cats::SampleState::TimedOut) {
+    cancelLearning("No se completó el registro: " + String(learning.progress.accepted()) +
+                   "/" + String(CALIBRATION_FRAMES) + " imágenes válidas. " + message);
+    return;
+  }
+  if (step == cats::SampleState::Waiting) {
+    if (issue == cats::TrainingIssue::LowLight)
+      message = "Esperando más luz; las capturas válidas se conservan.";
+    else if (issue == cats::TrainingIssue::NoForeground)
+      message = "Acerca el pelaje a la zona verde. Área detectada: " + String(analysis.foreground * 100, 0) + "% (mínimo " + String(state.options.minForeground) + "%).";
+    else message = "Evita sombras profundas y reflejos; las capturas válidas se conservan.";
+    return;
+  }
   if (learning.background) {
     for (size_t i = 0; i < cats::PIXELS; ++i) {
       learning.sums[i][0] += samples[i].r;
@@ -178,34 +203,23 @@ void advanceLearning() {
       learning.sums[i][2] += samples[i].b;
     }
   } else {
-    if (analysis.foreground < state.options.minForeground / 100.0f ||
-        !cats::suitable(analysis, learning.label)) {
-      cancelLearning("Registro cancelado: ocupa la zona con el pelaje elegido y evita manos, sombras o reflejos.");
-      return;
-    }
     if (!cats::addSample(learning.candidate, analysis.features)) {
       cancelLearning("Límite de muestras alcanzado. Borra la calibración para comenzar otra vez.");
       return;
     }
   }
-  ++learning.count;
-  if (learning.count < CALIBRATION_FRAMES) return;
+  message = "Captura válida guardada. Continúa mostrando el pelaje elegido.";
+  if (step != cats::SampleState::Complete) return;
 
   if (learning.background) {
     clearModel();
     for (size_t i = 0; i < cats::PIXELS; ++i)
       state.model.background[i] = cats::Rgb{
-        uint8_t(learning.sums[i][0] / learning.count),
-        uint8_t(learning.sums[i][1] / learning.count),
-        uint8_t(learning.sums[i][2] / learning.count)};
+        uint8_t(learning.sums[i][0] / learning.progress.accepted()),
+        uint8_t(learning.sums[i][1] / learning.progress.accepted()),
+        uint8_t(learning.sums[i][2] / learning.progress.accepted())};
     state.model.backgroundReady = true;
   } else {
-    const cats::Prototype &orange = learning.label == Label::Orange ? learning.candidate : state.model.orange;
-    const cats::Prototype &gray = learning.label == Label::Gray ? learning.candidate : state.model.gray;
-    if (!cats::separable(orange, gray)) {
-      cancelLearning("Registro rechazado: ambos colores se parecen demasiado. Mejora la luz y repite las muestras.");
-      return;
-    }
     if (learning.label == Label::Orange) state.model.orange = learning.candidate;
     else state.model.gray = learning.candidate;
   }
@@ -214,6 +228,8 @@ void advanceLearning() {
   stableLabel = Label::Calibration;
   message = saveState() ? "Registro guardado. Puedes añadir más posiciones de cada gato." :
                          "Registro activo, pero no se pudo guardar en memoria; se perderá al reiniciar.";
+  if (!cats::separable(state.model.orange, state.model.gray))
+    message += " Ambos perfiles se parecen demasiado: repite las muestras con mejor luz y una zona centrada en el pelaje.";
 }
 
 String jsonEscape(const String &value) {
@@ -233,17 +249,20 @@ void respond(int code, const String &text) {
 void status() {
   const cats::Options &o = state.options;
   String out;
-  out.reserve(800);
+  out.reserve(1100);
   out = "{\"label\":\""; out += cats::name(stableLabel);
+  out += "\",\"version\":\""; out += FIRMWARE_VERSION;
   out += "\",\"frame\":"; out += frameNumber;
   out += ",\"ageMs\":"; out += frameNumber ? millis() - lastGoodFrame : 0;
   out += ",\"foreground\":"; out += String(analysis.foreground, 3);
+  out += ",\"useful\":"; out += String(float(analysis.useful) / cats::PIXELS, 3);
   out += ",\"background\":"; out += state.model.backgroundReady ? "true" : "false";
   out += ",\"orangeSamples\":"; out += state.model.orange.count;
   out += ",\"graySamples\":"; out += state.model.gray.count;
   out += ",\"busy\":"; out += learning.active ? "true" : "false";
   out += ",\"job\":\""; out += learning.background ? "fondo" : cats::name(learning.label);
-  out += "\",\"progress\":"; out += learning.count;
+  out += "\",\"progress\":"; out += learning.progress.accepted();
+  out += ",\"attempts\":"; out += learning.progress.attempts();
   out += ",\"total\":"; out += CALIBRATION_FRAMES;
   out += ",\"message\":\""; out += jsonEscape(message);
   out += "\",\"options\":{\"x\":"; out += o.x;
@@ -271,13 +290,15 @@ void startLearning() {
   // Evitar un objeto temporal de 7 KB en la pila de la tarea Arduino.
   memset(&learning, 0, sizeof(learning));
   learning.active = true;
+  learning.progress.start(CALIBRATION_FRAMES, MAX_CALIBRATION_ATTEMPTS);
+  learning.started = millis();
   learning.background = label == "fondo";
   learning.label = label == "naranja" ? Label::Orange : Label::Gray;
   if (!learning.background)
     learning.candidate = learning.label == Label::Orange ? state.model.orange : state.model.gray;
   stabilizer.reset();
   stableLabel = Label::Calibration;
-  message = "Registro iniciado; mantén la escena durante cuatro segundos.";
+  message = "Registro iniciado. Reuniré ocho imágenes válidas durante un máximo de 25 segundos.";
   respond(202, message);
 }
 bool numericArg(const char *key, uint8_t &target) {
@@ -333,6 +354,7 @@ void beginServer() {
 }
 void setup() {
   Serial.begin(115200);
+  Serial.print("Firmware: "); Serial.println(FIRMWARE_VERSION);
   // Mantener apagado el flash blanco, que altera el color del pelaje.
   pinMode(4, OUTPUT); digitalWrite(4, LOW);
   loadState();
@@ -344,6 +366,9 @@ void setup() {
 }
 void loop() {
   server.handleClient();
+  if (learning.active && millis() - learning.started >= CALIBRATION_TIMEOUT_MS)
+    cancelLearning("Tiempo agotado con " + String(learning.progress.accepted()) + "/" +
+                   String(CALIBRATION_FRAMES) + " imágenes válidas. " + message);
   if (cameraReady && millis() - lastCapture >= CAPTURE_INTERVAL_MS) {
     lastCapture = millis();
     if (capture()) {
@@ -353,7 +378,10 @@ void loop() {
                     static_cast<unsigned long>(frameNumber), cats::name(stableLabel),
                     analysis.foreground, analysis.orangeDistance, analysis.grayDistance);
     } else {
-      if (learning.active) cancelLearning("Registro cancelado por un error de cámara.");
+      if (learning.active) {
+        const auto step = learning.progress.update(false);
+        if (step == cats::SampleState::TimedOut) cancelLearning("No se pudo completar el registro por errores de cámara.");
+      }
       stabilizer.reset();
       stableLabel = Label::Error;
       jpegLength = 0;

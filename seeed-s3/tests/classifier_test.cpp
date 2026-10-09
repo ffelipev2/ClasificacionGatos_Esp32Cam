@@ -1,4 +1,4 @@
-#include "../firmware/ESP32CAMGatos/classifier.h"
+#include "../firmware/XIAOS3Gatos/classifier.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -142,4 +142,3 @@ int main() {
   check(analyze(scene, model, options).label == Label::Error, "evitar analizar zona inválida");
   std::printf("OK: %u comprobaciones del clasificador\n", checks);
 }
-

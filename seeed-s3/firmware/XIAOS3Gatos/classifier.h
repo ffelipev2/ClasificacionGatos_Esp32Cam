@@ -70,4 +70,3 @@ class Stabilizer {
   Label candidate_ = Label::Unknown;
 };
 }  // namespace cats
-

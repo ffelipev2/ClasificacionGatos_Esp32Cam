@@ -3,7 +3,7 @@
 
 static const char WEB_UI[] PROGMEM = R"HTML(<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ESP32-CAM · Gatos</title><style>
+<title>XIAO ESP32S3 Sense · Gatos</title><style>
 :root{color-scheme:dark;font:16px system-ui,sans-serif;background:#101720;color:#ebf0f6}
 *{box-sizing:border-box}body{margin:0}main{max-width:1000px;margin:auto;padding:26px 18px}
 h1{font-size:26px;margin:0 0 8px}h2{font-size:18px;margin:0 0 14px}p{line-height:1.5;color:#bbc8d6}
@@ -22,12 +22,13 @@ label{font-size:14px;color:#bbc8d6}input{display:block;width:100%;padding:8px;ma
 .note{font-size:13px}footer{margin-top:20px;color:#8194aa;font-size:13px}
 @media(max-width:740px){.layout{grid-template-columns:1fr}main{padding:18px 12px}}
 </style></head><body><main>
-<h1>ESP32-CAM · Naranja o gris</h1>
+<h1>XIAO ESP32S3 Sense · Naranja o gris</h1>
 <p>Clasificación del pelaje en la zona marcada. Todo el análisis ocurre en la placa.</p>
 <div class="layout"><section class="card" aria-label="Cámara y resultado">
 <div class="camera"><img id="preview" alt="Vista de la cámara"><div class="roi" id="roi"></div></div>
 <div class="status muted" id="result" aria-live="polite">Conectando…</div>
 <div class="meta" id="metrics">Esperando imagen</div>
+<div class="meta" id="performance"></div>
 <p class="note">La cámara debe estar fija y un solo gato debe ocupar la zona marcada. El sistema compara colores; un objeto parecido también puede coincidir.</p>
 </section><section class="card"><h2>Calibración</h2>
 <div class="step"><p><b>1. Fondo vacío.</b> Retira los gatos de la zona y mantén la luz habitual. Registrar un nuevo fondo borra las muestras anteriores.</p>
@@ -53,39 +54,49 @@ label{font-size:14px;color:#bbc8d6}input{display:block;width:100%;padding:8px;ma
 </main><script>
 const $=id=>document.getElementById(id);
 const labels={sin_calibrar:'Falta calibración',sin_objeto:'Zona vacía',naranja:'Pelaje naranja',gris:'Pelaje gris',indeterminado:'Indeterminado',poca_luz:'Muy poca luz',error_camara:'Error de cámara'};
-let initialized=false,lastFrame=-1,imageLoading=false,offline=false,wasBusy=false;
+let initialized=false,offline=false,lastOptions='',streamUrl='',streamRetry=null,streamStarted=0,streamEnabled=false;
 async function json(url,options={}){
   const response=await fetch(url,{cache:'no-store',...options,signal:AbortSignal.timeout(10000)});
   const body=await response.json();if(!response.ok)throw Error(body.message||'No se pudo completar la acción');return body;
 }
 function setBusy(busy){document.querySelectorAll('button').forEach(b=>b.disabled=busy)}
-function imageDone(){imageLoading=false}
-$('preview').onload=imageDone;$('preview').onerror=imageDone;
+function startStream(){
+  if(!streamEnabled||!streamUrl||document.hidden)return;
+  clearTimeout(streamRetry);streamRetry=null;streamStarted=Date.now();
+  $('preview').src=streamUrl+'?t='+streamStarted;
+}
+function retryStream(){if(!streamEnabled||streamRetry!==null||document.hidden)return;streamRetry=setTimeout(startStream,1000)}
+$('preview').onerror=retryStream;
+document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(streamRetry);streamRetry=null;$('preview').removeAttribute('src')}else startStream()});
+window.addEventListener('pagehide',()=>{streamEnabled=false;clearTimeout(streamRetry);$('preview').removeAttribute('src')});
 async function poll(){
   try{
     const s=await json('/api/status');offline=false;
     $('result').textContent=s.busy?'Registrando '+s.job+'…':(labels[s.label]||s.label);
     $('result').className='status '+(s.label==='naranja'?'orange':s.label==='gris'?'gray':'muted');
-    $('metrics').textContent='Zona ocupada: '+Math.round(s.foreground*100)+'% · Píxeles útiles: '+Math.round((s.useful||0)*100)+'% · Imagen '+s.frame+(s.frame?' · Hace '+(s.ageMs/1000).toFixed(1)+' s':'');
+    $('metrics').textContent='Zona ocupada: '+Math.round(s.foreground*100)+'% · Píxeles útiles: '+Math.round((s.useful||0)*100)+'% · Imagen '+s.frame+(s.frame?' · Hace '+(s.ageMs/1000).toFixed(1)+' s':'')+' · Reconocimiento '+s.fps.toFixed(1)+'/s · Vídeo '+(s.streamClients?s.streamFps:s.videoFps).toFixed(1)+' FPS';
+    $('performance').textContent='Análisis '+s.analysisMs.toFixed(1)+' ms · Decodificación '+s.decodeMs.toFixed(1)+' ms · PSRAM libre '+(s.freePsram/1048576).toFixed(1)+' MB';
     $('bgCount').textContent=s.background?'Registrado':'Pendiente';
     $('orangeCount').textContent=s.orangeSamples+' imágenes';$('grayCount').textContent=s.graySamples+' imágenes';
     $('notice').textContent=s.busy?'Capturas válidas: '+s.progress+'/'+s.total+' · '+s.message:s.message;
     setBusy(s.busy);document.querySelectorAll('[data-learn]').forEach(b=>{if(b.dataset.learn!=='fondo')b.disabled=s.busy||!s.background});
-    if(!initialized){for(const [key,value]of Object.entries(s.options)){const input=$('settings').elements.namedItem(key);if(input)input.value=value}initialized=true}
+    if(!initialized||lastOptions!==JSON.stringify(s.options)){lastOptions=JSON.stringify(s.options);for(const [key,value]of Object.entries(s.options)){const input=$('settings').elements.namedItem(key);if(input)input.value=value}initialized=true}
     const r=$('roi');r.style.left=s.options.x+'%';r.style.top=s.options.y+'%';r.style.width=s.options.width+'%';r.style.height=s.options.height+'%';
-    if(s.frame!==lastFrame&&!imageLoading){imageLoading=true;lastFrame=s.frame;$('preview').src='/capture?frame='+s.frame}
-    if(wasBusy&&!s.busy)lastFrame=-1;wasBusy=s.busy;
+    if(s.streamPort&&s.videoFrame){
+      const url=new URL(location.href);url.port=s.streamPort;url.pathname='/stream';url.search='';url.hash='';
+      if(!streamEnabled||streamUrl!==url.href){streamUrl=url.href;streamEnabled=true;startStream()}
+      else if(!s.streamClients&&Date.now()-streamStarted>3000)retryStream();
+    }
   }catch(error){offline=true;$('result').textContent='Sin conexión con la placa';$('result').className='status muted';$('notice').textContent=error.message;setBusy(true)}
-  setTimeout(poll,offline?2000:750);
+  setTimeout(poll,offline?2000:500);
 }
 document.querySelectorAll('[data-learn]').forEach(b=>b.onclick=async()=>{
   setBusy(true);try{const s=await json('/api/learn?label='+b.dataset.learn,{method:'POST'});$('notice').textContent=s.message}catch(e){$('notice').textContent=e.message;setBusy(false)}
 });
-$('reset').onclick=async()=>{try{await json('/api/reset',{method:'POST'});$('notice').textContent='Calibración borrada'}catch(e){$('notice').textContent=e.message}};
+$('reset').onclick=async()=>{try{const s=await json('/api/reset',{method:'POST'});$('notice').textContent=s.message}catch(e){$('notice').textContent=e.message}};
 $('settings').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget;const x=+form.elements.x.value,y=+form.elements.y.value,w=+form.elements.width.value,h=+form.elements.height.value;
   if(x+w>100||y+h>100){$('notice').textContent='La zona debe quedar dentro de la imagen';return}
   try{const s=await json('/api/settings',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(new FormData(form))});$('notice').textContent=s.message;initialized=false}catch(e){$('notice').textContent=e.message}
 };
 poll();
 </script></body></html>)HTML";
-

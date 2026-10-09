@@ -1,0 +1,5 @@
+.pio/
+.build/
+.backups/
+firmware/XIAOS3Gatos/config.local.h
+*.log

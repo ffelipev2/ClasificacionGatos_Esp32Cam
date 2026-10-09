@@ -1,5 +1,6 @@
 .pio/
 .build/
 firmware/ESP32CAMGatos/config.local.h
+seeed-s3/firmware/XIAOS3Gatos/config.local.h
 *.log
 

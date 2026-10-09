@@ -1,0 +1,62 @@
+[
+  {
+    "frame": 384,
+    "label": "sin_calibrar",
+    "fps": 8,
+    "decodeMs": 62.6,
+    "analysisMs": 3.9,
+    "errors": 0,
+    "psramMB": 8,
+    "ip": "192.168.4.1"
+  },
+  {
+    "frame": 400,
+    "label": "sin_calibrar",
+    "fps": 8,
+    "decodeMs": 63,
+    "analysisMs": 3.9,
+    "errors": 0,
+    "psramMB": 8,
+    "ip": "192.168.4.1"
+  },
+  {
+    "frame": 416,
+    "label": "sin_calibrar",
+    "fps": 8,
+    "decodeMs": 62.3,
+    "analysisMs": 3.8,
+    "errors": 0,
+    "psramMB": 8,
+    "ip": "192.168.4.1"
+  },
+  {
+    "frame": 432,
+    "label": "sin_calibrar",
+    "fps": 8,
+    "decodeMs": 63,
+    "analysisMs": 3.9,
+    "errors": 0,
+    "psramMB": 8,
+    "ip": "192.168.4.1"
+  },
+  {
+    "frame": 448,
+    "label": "sin_calibrar",
+    "fps": 8,
+    "decodeMs": 62.3,
+    "analysisMs": 3.9,
+    "errors": 0,
+    "psramMB": 8,
+    "ip": "192.168.4.1"
+  },
+  {
+    "frame": 464,
+    "label": "sin_calibrar",
+    "fps": 8,
+    "decodeMs": 62.9,
+    "analysisMs": 3.9,
+    "errors": 0,
+    "psramMB": 8,
+    "ip": "192.168.4.1"
+  }
+]

@@ -1,4 +1,4 @@
-# Carga en la ESP32-CAM conectada
+# Carga inicial de la versión 1 en la ESP32-CAM
 
 - Puerto: **COM17**, adaptador USB-SERIAL CH340.
 - Chip confirmado: ESP32-D0WD, revisión 1.0.
