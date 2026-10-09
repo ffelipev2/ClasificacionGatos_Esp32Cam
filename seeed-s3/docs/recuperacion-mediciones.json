@@ -1,0 +1,37 @@
+{
+  "RECONNECTTEST": {
+    "handoffs": 11,
+    "api": 11,
+    "failures": 0,
+    "maxConnectMs": 23,
+    "sessionMs": 34999,
+    "bytes": 3749953,
+    "recognition": 7.9,
+    "cameraErrors": 0,
+    "timeouts": 11,
+    "clients": 0,
+    "calibration": 1
+  },
+  "RECONNECTHEAP": {
+    "before": 147612,
+    "after": 140368,
+    "min": 138624,
+    "merged": 0,
+    "bg": 1,
+    "orange": 8,
+    "gray": 8
+  },
+  "SELFTEST": {
+    "connected": 1,
+    "frames": 205,
+    "fps": 25.6,
+    "duplicates": 0,
+    "api": 1,
+    "recognition": 8.0,
+    "bg": 1,
+    "orange": 8,
+    "gray": 8
+  },
+  "monotonicFrames": true,
+  "driverOverflowWarnings": 0
+}

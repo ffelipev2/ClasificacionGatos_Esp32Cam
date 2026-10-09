@@ -7,8 +7,9 @@ namespace cats {
 // bytes se hace fuera del mutex: ningún escritor reutiliza un buffer leído.
 class PreviewPool {
  public:
-  // Espacio para escritor, analizador, vídeo, foto y última imagen.
-  static constexpr unsigned SLOTS = 5;
+  // Espacio para escritor, analizador, foto, última imagen y dos tareas
+  // de vídeo durante el relevo de una conexión antigua por una nueva.
+  static constexpr unsigned SLOTS = 6;
   int beginWrite() {
     for (unsigned i = 0; i < SLOTS; ++i) {
       if (int(i) != current_ && !slots_[i].writing && !slots_[i].readers) {

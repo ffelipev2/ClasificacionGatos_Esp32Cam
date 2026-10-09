@@ -54,7 +54,7 @@ label{font-size:14px;color:#bbc8d6}input{display:block;width:100%;padding:8px;ma
 </main><script>
 const $=id=>document.getElementById(id);
 const labels={sin_calibrar:'Falta calibración',sin_objeto:'Zona vacía',naranja:'Pelaje naranja',gris:'Pelaje gris',indeterminado:'Indeterminado',poca_luz:'Muy poca luz',error_camara:'Error de cámara'};
-let initialized=false,offline=false,lastOptions='',streamUrl='',streamRetry=null,streamStarted=0,streamEnabled=false;
+let initialized=false,offline=false,lastOptions='',streamUrl='',streamRetry=null,streamStarted=0,streamEnabled=false,streamFrame=0,streamProgressAt=0;
 async function json(url,options={}){
   const response=await fetch(url,{cache:'no-store',...options,signal:AbortSignal.timeout(10000)});
   const body=await response.json();if(!response.ok)throw Error(body.message||'No se pudo completar la acción');return body;
@@ -62,16 +62,27 @@ async function json(url,options={}){
 function setBusy(busy){document.querySelectorAll('button').forEach(b=>b.disabled=busy)}
 function startStream(){
   if(!streamEnabled||!streamUrl||document.hidden)return;
-  clearTimeout(streamRetry);streamRetry=null;streamStarted=Date.now();
+  clearTimeout(streamRetry);streamRetry=null;streamStarted=Date.now();streamProgressAt=streamStarted;streamFrame=0;
+  $('preview').removeAttribute('src');
   $('preview').src=streamUrl+'?t='+streamStarted;
 }
-function retryStream(){if(!streamEnabled||streamRetry!==null||document.hidden)return;streamRetry=setTimeout(startStream,1000)}
+function stopStream(){clearTimeout(streamRetry);streamRetry=null;$('preview').removeAttribute('src')}
+function retryStream(){if(!streamEnabled||streamRetry!==null||document.hidden)return;$('preview').removeAttribute('src');streamRetry=setTimeout(startStream,1000)}
+function checkStream(s){
+  if(!streamEnabled||document.hidden||streamRetry!==null)return;
+  const now=Date.now();
+  if(s.streamFrame&&s.streamFrame!==streamFrame){streamFrame=s.streamFrame;streamProgressAt=now}
+  // Un MJPEG detenido puede conservar la última imagen sin disparar onerror.
+  // Renovar también periódicamente por si el navegador dejó de renderizar.
+  if(now-streamProgressAt>3000||now-streamStarted>=30000)retryStream();
+}
 $('preview').onerror=retryStream;
-document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(streamRetry);streamRetry=null;$('preview').removeAttribute('src')}else startStream()});
-window.addEventListener('pagehide',()=>{streamEnabled=false;clearTimeout(streamRetry);$('preview').removeAttribute('src')});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stopStream();else startStream()});
+window.addEventListener('pagehide',stopStream);
+window.addEventListener('pageshow',()=>{if(streamEnabled)startStream()});
 async function poll(){
   try{
-    const s=await json('/api/status');offline=false;
+    const s=await json('/api/status');const recovered=offline;offline=false;
     $('result').textContent=s.busy?'Registrando '+s.job+'…':(labels[s.label]||s.label);
     $('result').className='status '+(s.label==='naranja'?'orange':s.label==='gris'?'gray':'muted');
     $('metrics').textContent='Zona ocupada: '+Math.round(s.foreground*100)+'% · Píxeles útiles: '+Math.round((s.useful||0)*100)+'% · Imagen '+s.frame+(s.frame?' · Hace '+(s.ageMs/1000).toFixed(1)+' s':'')+' · Reconocimiento '+s.fps.toFixed(1)+'/s · Vídeo '+(s.streamClients?s.streamFps:s.videoFps).toFixed(1)+' FPS';
@@ -84,10 +95,10 @@ async function poll(){
     const r=$('roi');r.style.left=s.options.x+'%';r.style.top=s.options.y+'%';r.style.width=s.options.width+'%';r.style.height=s.options.height+'%';
     if(s.streamPort&&s.videoFrame){
       const url=new URL(location.href);url.port=s.streamPort;url.pathname='/stream';url.search='';url.hash='';
-      if(!streamEnabled||streamUrl!==url.href){streamUrl=url.href;streamEnabled=true;startStream()}
-      else if(!s.streamClients&&Date.now()-streamStarted>3000)retryStream();
+      if(!streamEnabled||streamUrl!==url.href||recovered){streamUrl=url.href;streamEnabled=true;startStream()}
+      else checkStream(s);
     }
-  }catch(error){offline=true;$('result').textContent='Sin conexión con la placa';$('result').className='status muted';$('notice').textContent=error.message;setBusy(true)}
+  }catch(error){offline=true;stopStream();$('result').textContent='Sin conexión con la placa';$('result').className='status muted';$('notice').textContent=error.message;setBusy(true)}
   setTimeout(poll,offline?2000:500);
 }
 document.querySelectorAll('[data-learn]').forEach(b=>b.onclick=async()=>{

@@ -13,6 +13,8 @@
 // Ambos servidores definen HTTP_ANY; usamos métodos GET/POST explícitos.
 #undef HTTP_ANY
 #include <esp_http_server.h>
+#include <lwip/sockets.h>
+#include <errno.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +22,7 @@
 #include "classifier.h"
 #include "web_ui.h"
 #include "preview_pool.h"
+#include "jpeg_frame.h"
 
 #if !defined(CONFIG_IDF_TARGET_ESP32S3)
 #error "Este firmware requiere la XIAO ESP32S3 Sense."
@@ -70,6 +73,7 @@ String message = "Registra el fondo vacío y después ambos gatos.";
 // mientras decodifican JPEG o escriben en una conexión de red.
 struct VideoState {
   uint32_t frame = 0, goodAt = 0, errors = 0, drops = 0;
+  uint32_t epoch = 0, sentFrame = 0, sentAt = 0, starts = 0, timeouts = 0, merged = 0;
   float fps = 0, captureMs = 0, streamFps = 0;
   unsigned clients = 0;
 } video;
@@ -220,6 +224,7 @@ struct Snapshot {
   float foreground = 0, useful = 0, fps = 0;
   float captureMs = 0, decodeMs = 0, analysisMs = 0, workMs = 0;
   uint32_t videoFrame = 0, videoAt = 0, previewDrops = 0, videoErrors = 0;
+  uint32_t streamFrame = 0, streamAt = 0, streamStarts = 0, streamTimeouts = 0, mergedJpegs = 0;
   float videoFps = 0, streamFps = 0;
   unsigned streamClients = 0;
   size_t freePsram = 0, freeHeap = 0;
@@ -270,6 +275,11 @@ Snapshot readSnapshot() {
   copy.videoErrors = video.errors;
   copy.streamFps = video.streamFps;
   copy.streamClients = video.clients;
+  copy.streamFrame = video.sentFrame;
+  copy.streamAt = video.sentAt;
+  copy.streamStarts = video.starts;
+  copy.streamTimeouts = video.timeouts;
+  copy.mergedJpegs = video.merged;
   copy.errors += video.errors;
   xSemaphoreGive(sharedMutex);
   return copy;
@@ -308,7 +318,10 @@ bool beginCamera() {
   c.pin_pwdn = -1; c.pin_reset = -1;
   c.xclk_freq_hz = 20000000;
   c.pixel_format = PIXFORMAT_JPEG;
-  c.frame_size = FRAMESIZE_QVGA;
+  // El driver reserva JPEG como ancho*alto/5: QVGA solo deja 15 KB.
+  // Reservar 96 KB por framebuffer en PSRAM y luego capturar en QVGA,
+  // como el ejemplo oficial que inicializa grande y reduce el sensor.
+  c.frame_size = FRAMESIZE_SVGA;
   c.jpeg_quality = 12;
   c.fb_count = 2;  // Cola corta para reducir el retraso del vídeo.
   c.fb_location = CAMERA_FB_IN_PSRAM;
@@ -319,6 +332,11 @@ bool beginCamera() {
     return false;
   }
   sensor_t *sensor = esp_camera_sensor_get();
+  if (!sensor || sensor->set_framesize(sensor, FRAMESIZE_QVGA) != 0) {
+    esp_camera_deinit();
+    message = "No se pudo configurar la cámara en 320 × 240.";
+    return false;
+  }
   if (sensor) {
     sensor->set_whitebal(sensor, 1);
     sensor->set_awb_gain(sensor, 1);
@@ -336,8 +354,11 @@ void captureProducer(void *) {
     const int64_t started = esp_timer_get_time();
     camera_fb_t *fb = esp_camera_fb_get();
     const float elapsed = (esp_timer_get_time() - started) / 1000.0f;
+    cats::JpegFrame jpeg;
+    if (fb && fb->format == PIXFORMAT_JPEG && fb->len <= MAX_JPEG_BYTES)
+      jpeg = cats::latestJpeg(fb->buf, fb->len, FRAME_W, FRAME_H);
     const bool ok = fb && fb->width == FRAME_W && fb->height == FRAME_H &&
-                    fb->format == PIXFORMAT_JPEG && fb->len <= MAX_JPEG_BYTES;
+                    fb->format == PIXFORMAT_JPEG && jpeg.bytes;
     if (!ok) {
       if (fb) esp_camera_fb_return(fb);
       xSemaphoreTake(sharedMutex, portMAX_DELAY);
@@ -352,13 +373,14 @@ void captureProducer(void *) {
     const int slot = previewPool.beginWrite();
     xSemaphoreGive(sharedMutex);
     if (slot >= 0) {
-      const size_t bytes = fb->len;
-      memcpy(previewBytes[slot], fb->buf, bytes);
+      const size_t bytes = jpeg.bytes;
+      memcpy(previewBytes[slot], fb->buf + jpeg.offset, bytes);
       esp_camera_fb_return(fb);
       const uint32_t now = millis();
       xSemaphoreTake(sharedMutex, portMAX_DELAY);
       video.goodAt = now;
       video.captureMs = elapsed;
+      if (jpeg.images > 1) ++video.merged;
       previewAt[slot] = now;
       previewPool.publish(slot, bytes, ++video.frame);
       ++rateFrames;
@@ -556,6 +578,11 @@ void status() {
   out += ",\"videoFps\":"; out += String(videoAge > 2500 ? 0 : s.videoFps, 1);
   out += ",\"streamFps\":"; out += String(s.streamFps, 1);
   out += ",\"streamClients\":"; out += s.streamClients;
+  out += ",\"streamFrame\":"; out += s.streamFrame;
+  out += ",\"streamAgeMs\":"; out += s.streamFrame ? millis() - s.streamAt : 0;
+  out += ",\"streamStarts\":"; out += s.streamStarts;
+  out += ",\"streamTimeouts\":"; out += s.streamTimeouts;
+  out += ",\"mergedJpegs\":"; out += s.mergedJpegs;
   out += ",\"streamPort\":"; out += streamServer ? STREAM_PORT : 0;
   out += ",\"previewDrops\":"; out += s.previewDrops;
   out += ",\"captureMs\":"; out += String(s.captureMs, 2);
@@ -641,31 +668,79 @@ void settings() {
   enqueue(command);
 }
 
-// Servidor separado: una conexión de vídeo permanece abierta sin ocupar
-// el servidor del panel, de los ajustes ni del progreso de calibración.
-esp_err_t streamHandler(httpd_req_t *req) {
+// Dos tareas permiten relevar una conexión atascada. El último visor tiene
+// prioridad; el servidor HTTP queda libre para recibir su reconexión.
+struct StreamJob {
+  httpd_req_t *req = nullptr;
+  int socket = -1;
+  uint32_t epoch = 0, sendStarted = 0;
+  bool active = false, timedOut = false;
+} streamJobs[2];
+
+// El timeout SO_SNDTIMEO limita cada send(), no la imagen completa. Un
+// cliente que lee muy despacio puede prolongar indefinidamente los envíos
+// parciales. Este límite engloba cabecera, JPEG y todas sus escrituras.
+int boundedStreamSend(httpd_handle_t, int socket, const char *buf, size_t bytes, int flags) {
+  for (;;) {
+    xSemaphoreTake(sharedMutex, portMAX_DELAY);
+    StreamJob *job = nullptr;
+    for (auto &candidate : streamJobs)
+      if (candidate.active && candidate.socket == socket) { job = &candidate; break; }
+    const bool current = job && job->epoch == video.epoch;
+    const bool expired = job && millis() - job->sendStarted >= STREAM_SEND_TIMEOUT_MS;
+    if (expired && current) job->timedOut = true;
+    xSemaphoreGive(sharedMutex);
+    if (!current) return HTTPD_SOCK_ERR_FAIL;
+    if (expired) return HTTPD_SOCK_ERR_TIMEOUT;
+    const int sent = send(socket, buf, bytes, flags | MSG_DONTWAIT);
+    if (sent > 0) return sent;
+    if (!sent || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+      return HTTPD_SOCK_ERR_FAIL;
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+}
+
+// Completar y cerrar desde la propia tarea HTTPD evita que un descriptor
+// se reutilice entre la finalización asíncrona y su cierre.
+void finishStream(void *argument) {
+  StreamJob &job = *static_cast<StreamJob *>(argument);
+  httpd_req_async_handler_complete(job.req);
+  shutdown(job.socket, SHUT_RDWR);  // HTTPD recoge el EOF y libera la sesión.
+  xSemaphoreTake(sharedMutex, portMAX_DELAY);
+  --video.clients;
+  if (job.epoch == video.epoch) video.streamFps = 0;
+  if (job.timedOut) ++video.timeouts;
+  job.active = false;
+  job.req = nullptr;
+  xSemaphoreGive(sharedMutex);
+}
+
+void streamTask(void *argument) {
+  StreamJob &job = *static_cast<StreamJob *>(argument);
+  httpd_req_t *req = job.req;
   httpd_resp_set_type(req, "multipart/x-mixed-replace;boundary=catframe");
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-  xSemaphoreTake(sharedMutex, portMAX_DELAY);
-  ++video.clients;
-  video.streamFps = 0;
-  xSemaphoreGive(sharedMutex);
+  httpd_resp_set_hdr(req, "Connection", "close");
   uint32_t lastFrame = 0, waitingSince = millis(), rateSince = millis(), rateFrames = 0;
+  const uint32_t started = millis();
   esp_err_t result = ESP_OK;
   for (;;) {
     size_t bytes;
     uint32_t frame;
     xSemaphoreTake(sharedMutex, portMAX_DELAY);
+    const bool current = job.epoch == video.epoch;
     const int slot = previewPool.acquire(bytes, frame);
     const uint32_t capturedAt = slot >= 0 ? previewAt[slot] : 0;
     xSemaphoreGive(sharedMutex);
-    if (slot < 0 || frame == lastFrame || millis() - capturedAt > 2500) {
+    if (!current || millis() - started >= STREAM_SESSION_MS ||
+        slot < 0 || frame == lastFrame || millis() - capturedAt > 2500) {
       if (slot >= 0) {
         xSemaphoreTake(sharedMutex, portMAX_DELAY);
         previewPool.release(slot);
         xSemaphoreGive(sharedMutex);
       }
+      if (!current || millis() - started >= STREAM_SESSION_MS) break;
       if (millis() - waitingSince > 2500) { result = ESP_FAIL; break; }
       vTaskDelay(pdMS_TO_TICKS(2));
       continue;
@@ -674,6 +749,9 @@ esp_err_t streamHandler(httpd_req_t *req) {
     const int len = snprintf(header, sizeof(header),
       "\r\n--catframe\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\nX-Frame-Number: %lu\r\n\r\n",
       static_cast<unsigned>(bytes), static_cast<unsigned long>(frame));
+    xSemaphoreTake(sharedMutex, portMAX_DELAY);
+    job.sendStarted = millis();
+    xSemaphoreGive(sharedMutex);
     result = httpd_resp_send_chunk(req, header, len);
     if (result == ESP_OK)
       result = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(previewBytes[slot]), bytes);
@@ -683,9 +761,14 @@ esp_err_t streamHandler(httpd_req_t *req) {
     if (result != ESP_OK) break;
     const uint32_t now = millis();
     xSemaphoreTake(sharedMutex, portMAX_DELAY);
+    const bool stillCurrent = job.epoch == video.epoch;
+    if (stillCurrent) {
+      video.sentFrame = frame;
+      video.sentAt = now;
+    }
     ++rateFrames;
     if (now - rateSince >= 1000) {
-      video.streamFps = rateFrames * 1000.0f / (now - rateSince);
+      if (stillCurrent) video.streamFps = rateFrames * 1000.0f / (now - rateSince);
       rateSince = now;
       rateFrames = 0;
     }
@@ -693,11 +776,52 @@ esp_err_t streamHandler(httpd_req_t *req) {
     waitingSince = now;
     lastFrame = frame;
   }
+  // Ya no hay buffers retenidos. Si el control HTTP está ocupado, esperar
+  // sin consumir CPU hasta que pueda liberar esta petición y su sesión.
+  while (httpd_queue_work(streamServer, finishStream, &job) != ESP_OK)
+    vTaskDelay(pdMS_TO_TICKS(2));
+  vTaskDelete(nullptr);
+}
+
+esp_err_t streamHandler(httpd_req_t *req) {
   xSemaphoreTake(sharedMutex, portMAX_DELAY);
-  --video.clients;
-  video.streamFps = 0;
+  StreamJob *job = nullptr;
+  for (auto &candidate : streamJobs)
+    if (!candidate.active) { job = &candidate; break; }
+  if (job) job->active = true;
   xSemaphoreGive(sharedMutex);
-  return result;
+  if (!job) {
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    httpd_resp_set_hdr(req, "Retry-After", "1");
+    return httpd_resp_send(req, "Reintenta el vídeo en un segundo.", HTTPD_RESP_USE_STRLEN);
+  }
+  httpd_req_t *copy = nullptr;
+  if (httpd_req_async_handler_begin(req, &copy) != ESP_OK) {
+    xSemaphoreTake(sharedMutex, portMAX_DELAY);
+    job->active = false;
+    xSemaphoreGive(sharedMutex);
+    return ESP_FAIL;
+  }
+  const int socket = httpd_req_to_sockfd(copy);
+  httpd_sess_set_send_override(req->handle, socket, boundedStreamSend);
+  xSemaphoreTake(sharedMutex, portMAX_DELAY);
+  job->req = copy;
+  job->socket = socket;
+  job->epoch = ++video.epoch;
+  job->timedOut = false;
+  video.streamFps = 0;
+  ++video.clients;
+  ++video.starts;
+  xSemaphoreGive(sharedMutex);
+  if (xTaskCreatePinnedToCore(streamTask, "cat-stream", 4096, job, 1, nullptr, 1) == pdPASS)
+    return ESP_OK;
+  httpd_req_async_handler_complete(copy);
+  xSemaphoreTake(sharedMutex, portMAX_DELAY);
+  job->active = false;
+  job->req = nullptr;
+  --video.clients;
+  xSemaphoreGive(sharedMutex);
+  return ESP_FAIL;
 }
 void beginStreamServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -705,7 +829,7 @@ void beginStreamServer() {
   config.ctrl_port = 32769;
   config.core_id = 1;
   config.stack_size = 4096;
-  config.max_open_sockets = 2;
+  config.max_open_sockets = 4;
   config.lru_purge_enable = true;
   config.send_wait_timeout = 1;
   config.recv_wait_timeout = 2;
@@ -820,14 +944,120 @@ void streamTestTask(void *) {
   xSemaphoreGive(sharedMutex);
   vTaskDelete(nullptr);
 }
+
+// 'r': mantener un visor antiguo abierto al conectar el siguiente y dejar
+// clientes sin leer, como ocurre al suspender una pestaña o perder Wi-Fi.
+// Solo lee vídeo/estado: no toca ajustes, modelos ni memoria persistente.
+void reconnectTestTask(void *) {
+  const Snapshot before = readSnapshot();
+  uint32_t handoffs = 0, probes = 0, failures = 0, worstConnect = 0, bytesRead = 0;
+  size_t minHeap = before.freeHeap;
+  const uint32_t started = millis();
+  while (millis() - started < 60000) {
+    WiFiClient oldViewer, nextViewer;
+    oldViewer.setTimeout(600);
+    nextViewer.setTimeout(600);
+    bool oldOk = oldViewer.connect(IPAddress(127, 0, 0, 1), STREAM_PORT, 600);
+    if (oldOk) {
+      oldViewer.print("GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+      oldOk = oldViewer.readStringUntil('\n').indexOf("200") >= 0;
+    }
+    uint8_t buffer[1024];
+    const uint32_t warmup = millis();
+    while (oldOk && millis() - warmup < 400) {
+      if (oldViewer.available()) oldViewer.read(buffer, sizeof(buffer));
+      vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    // No cerrar oldViewer antes de pedir el vídeo nuevo.
+    const uint32_t connectAt = millis();
+    bool nextOk = nextViewer.connect(IPAddress(127, 0, 0, 1), STREAM_PORT, 600);
+    if (nextOk) {
+      nextViewer.print("GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+      nextOk = nextViewer.readStringUntil('\n').indexOf("200") >= 0;
+    }
+    const uint32_t latency = millis() - connectAt;
+    if (latency > worstConnect) worstConnect = latency;
+    if (oldOk && nextOk && latency < 600) ++handoffs;
+    else ++failures;
+    oldViewer.stop();
+    const uint32_t readingAt = millis();
+    uint32_t received = 0;
+    while (nextOk && millis() - readingAt < 2000) {
+      if (nextViewer.available()) {
+        const int n = nextViewer.read(buffer, sizeof(buffer));
+        if (n > 0) received += n;
+      }
+      vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    bytesRead += received;
+    if (!received) ++failures;
+    WiFiClient probe;
+    probe.setTimeout(600);
+    bool apiOk = probe.connect(IPAddress(127, 0, 0, 1), 80, 600);
+    if (apiOk) {
+      probe.print("GET /api/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+      apiOk = probe.readStringUntil('\n').indexOf("200") >= 0;
+    }
+    if (apiOk) ++probes;
+    else ++failures;
+    probe.stop();
+    // El visor deja de leer sin cerrar TCP. El presupuesto por imagen
+    // debe liberar su tarea y los buffers, manteniendo el análisis.
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    const Snapshot paused = readSnapshot();
+    if (paused.streamClients || paused.frame <= before.frame || paused.fps < 5) ++failures;
+    if (paused.freeHeap < minHeap) minHeap = paused.freeHeap;
+    nextViewer.stop();
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+  // Verificar también la expiración de una conexión larga que sigue
+  // leyendo: no debe dejar una tarea o sesión ocupada tras los 35 s.
+  WiFiClient longViewer;
+  longViewer.setTimeout(600);
+  bool longOk = longViewer.connect(IPAddress(127, 0, 0, 1), STREAM_PORT, 600);
+  if (longOk) {
+    longViewer.print("GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    longOk = longViewer.readStringUntil('\n').indexOf("200") >= 0;
+  }
+  const uint32_t longStarted = millis();
+  uint8_t longBuffer[1024];
+  while (longOk && millis() - longStarted < STREAM_SESSION_MS + 2000) {
+    if (longViewer.available()) longViewer.read(longBuffer, sizeof(longBuffer));
+    else if (!longViewer.connected()) break;
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+  const uint32_t sessionMs = millis() - longStarted;
+  if (!longOk || longViewer.connected() || sessionMs < STREAM_SESSION_MS - 1000 ||
+      sessionMs > STREAM_SESSION_MS + 1000) ++failures;
+  longViewer.stop();
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  const Snapshot after = readSnapshot();
+  const bool preserved = before.background == after.background &&
+    before.orange == after.orange && before.gray == after.gray;
+  Serial.printf("RECONNECTTEST handoffs=%lu,api=%lu,failures=%lu,maxConnectMs=%lu,sessionMs=%lu,bytes=%lu,recognition=%.1f,cameraErrors=%lu,timeouts=%lu,clients=%u,calibration=%u\n",
+    static_cast<unsigned long>(handoffs), static_cast<unsigned long>(probes),
+    static_cast<unsigned long>(failures), static_cast<unsigned long>(worstConnect),
+    static_cast<unsigned long>(sessionMs), static_cast<unsigned long>(bytesRead), after.fps,
+    static_cast<unsigned long>(after.errors - before.errors),
+    static_cast<unsigned long>(after.streamTimeouts - before.streamTimeouts), after.streamClients, preserved);
+  Serial.printf("RECONNECTHEAP before=%u,after=%u,min=%u,merged=%lu,bg=%u,orange=%u,gray=%u\n",
+    static_cast<unsigned>(before.freeHeap), static_cast<unsigned>(after.freeHeap),
+    static_cast<unsigned>(minHeap), static_cast<unsigned long>(after.mergedJpegs),
+    after.background, after.orange, after.gray);
+  xSemaphoreTake(sharedMutex, portMAX_DELAY);
+  testRunning = false;
+  xSemaphoreGive(sharedMutex);
+  vTaskDelete(nullptr);
+}
 void serialCommands() {
   while (Serial.available()) {
-    if (Serial.read() != 't') continue;
+    const int command = Serial.read();
+    if (command != 't' && command != 'r') continue;
     xSemaphoreTake(sharedMutex, portMAX_DELAY);
     const bool start = !testRunning;
     if (start) testRunning = true;
     xSemaphoreGive(sharedMutex);
-    if (start && xTaskCreatePinnedToCore(streamTestTask, "stream-test", 6144,
+    if (start && xTaskCreatePinnedToCore(command == 'r' ? reconnectTestTask : streamTestTask, "stream-test", 6144,
                                         nullptr, 1, nullptr, 1) != pdPASS) {
       xSemaphoreTake(sharedMutex, portMAX_DELAY);
       testRunning = false;

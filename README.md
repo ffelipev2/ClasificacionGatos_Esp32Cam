@@ -7,7 +7,7 @@ Hay dos proyectos independientes. Elige el correspondiente a tu placa:
 | Placa | Versión | Proyecto | Instrucciones |
 |---|---|---|---|
 | ESP32-CAM AI Thinker, OV2640 y PSRAM | `2.0-calibracion` | [firmware/ESP32CAMGatos](firmware/ESP32CAMGatos) | [Manual ESP32-CAM](docs/esp32cam.md) |
-| Seeed XIAO ESP32S3 Sense, 8 MB de flash y PSRAM OPI | `3.1-video` | [seeed-s3](seeed-s3) | [Manual XIAO Sense](seeed-s3/README.md) |
+| Seeed XIAO ESP32S3 Sense, 8 MB de flash y PSRAM OPI | `3.2-recuperacion-video` | [seeed-s3](seeed-s3) | [Manual XIAO Sense](seeed-s3/README.md) |
 
 El sistema aprende colores dentro de una zona fija de la imagen. Supone que un solo gato ocupa esa zona; una mano, tela u objeto de color parecido también puede coincidir. No incorpora un detector neuronal de gatos ni identifica individuos de igual color.
 
@@ -29,20 +29,25 @@ Desde la raíz de este repositorio, con las herramientas ESP32 de Arduino instal
 .\seeed-s3\cargar.ps1 -Port COM30 -SoloAplicacion
 ```
 
-Sustituye `COM30` por el puerto de tu placa. Para una instalación nueva, usa el mismo comando sin `-SoloAplicacion`. El script verifica chip, flash y hashes de los binarios, respalda NVS y carga el firmware. La actualización de **3.0 a 3.1 conserva los registros de calibración**.
+Sustituye `COM30` por el puerto de tu placa. Para una instalación nueva, usa el mismo comando sin `-SoloAplicacion`. El script verifica chip, flash y hashes de los binarios, respalda NVS y carga el firmware. La actualización de **3.0 o 3.1 a 3.2 conserva los registros de calibración**.
 
 ## Vídeo continuo en la versión S3
 
-La versión `3.1-video` corrige la vista entrecortada de las fotos solicitadas cada 200 ms, que tenía un máximo teórico de cinco imágenes por segundo:
+La versión S3 usa vídeo continuo desde `3.1-video`. La versión actual, `3.2-recuperacion-video`, añade recuperación cuando la imagen se queda congelada:
 
 - Captura JPEG continuamente, mientras otra tarea analiza la última imagen disponible cada 125 ms.
-- Usa cinco buffers de vista en PSRAM para evitar sobrescribir imágenes que se están leyendo o enviando.
+- Reserva unos 96 KB en PSRAM por framebuffer de cámara, en lugar de 15 KB, manteniendo la imagen en 320 × 240. Si una captura contiene varias imágenes JPEG, envía y analiza solo la última completa, con dimensiones verificadas.
+- Usa seis buffers de vista en PSRAM para evitar sobrescribir imágenes que se están leyendo o enviando, también durante una reconexión.
 - Mantiene una conexión **MJPEG en el puerto 81** y atiende el panel y la calibración en el **puerto 80**.
-- Muestra velocidades separadas del vídeo y del reconocimiento, reintenta la conexión y pausa el vídeo cuando se oculta la pestaña.
+- Permite reemplazar una conexión antigua sin esperar a que termine. El último visor abierto tiene prioridad.
+- Limita a un segundo el envío completo de cada imagen; libera clientes que dejan de leer y sus buffers.
+- Detecta falta de progreso durante tres segundos, reintenta y renueva la conexión cada 30 segundos. Pausa el vídeo al ocultar la pestaña y lo recupera al volver.
 
-En la prueba HTTP interna realizada en una XIAO conectada se recibieron **207 imágenes únicas en ocho segundos: 25,9 FPS**, con **8,0 análisis por segundo**, respuesta de la API y cero errores de cámara. Esa prueba usa TCP local dentro de la placa; la fluidez visible en el teléfono también depende del Wi-Fi y del navegador. El [registro de verificación](seeed-s3/docs/video-fluido.md) explica el método y sus límites.
+En la prueba HTTP interna de la versión 3.2 se recibieron **205 imágenes únicas en ocho segundos: 25,6 FPS**, con **8,0 análisis por segundo**, respuesta de la API y cero duplicados. También pasaron **11 relevos de conexiones y 11 recuperaciones de clientes detenidos**. Esa prueba usa TCP local dentro de la placa; la fluidez visible en el teléfono también depende del Wi-Fi y del navegador.
 
-El flujo directo está en **http://192.168.4.1:81/stream**. Se recomienda un visor de vídeo a la vez.
+La [verificación de recuperación](seeed-s3/docs/recuperacion-video.md) documenta las pruebas de conexiones antiguas, clientes detenidos y expiración de sesiones de la versión 3.2.
+
+El flujo directo está en **http://192.168.4.1:81/stream**. Se recomienda un visor de vídeo a la vez. El panel renueva el flujo automáticamente; al usar la URL directa, la sesión termina después de 35 segundos y debes volver a abrirla.
 
 ## ESP32-CAM AI Thinker
 
@@ -70,8 +75,11 @@ Con g++ en PATH o desde Developer PowerShell for Visual Studio:
 # ESP32-CAM: clasificador
 .\tests\run-tests.ps1
 
-# XIAO Sense: clasificador y protección de buffers
+# XIAO Sense: clasificador, protección de buffers y validación JPEG
 .\seeed-s3\tests\run-tests.ps1
+
+# XIAO Sense: recuperación del panel (requiere Node.js)
+node .\seeed-s3\tests\web_ui_test.cjs
 ```
 
 Las **85 comprobaciones del clasificador** cubren naranja pálido y brillante, gris, fondos, colores desconocidos, poca luz, muestras intercaladas y estabilidad temporal. Las pruebas de la S3 comprueban también lectores simultáneos y recuperación de buffers. Son pruebas sintéticas: la precisión con gatos reales debe comprobarse en el montaje, con posiciones distintas de las usadas para aprender.

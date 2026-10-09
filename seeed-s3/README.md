@@ -10,13 +10,17 @@ Versión independiente del proyecto ESP32-CAM, optimizada para **Seeed Studio XI
 | Decodificación RGB565 | 320 × 240, 153 600 bytes | 160 × 120, 38 400 bytes |
 | Vista del navegador | Fotos periódicas, JPEG 320 × 240 | Vídeo MJPEG continuo, 320 × 240 |
 | Cámara y servidor | En el mismo bucle | Captura y análisis independientes; vídeo y API en servidores separados |
-| Buffers de vista | Uno | Cinco en PSRAM, protegidos durante lectura y envío |
+| Buffers de vista | Uno | Seis en PSRAM, protegidos durante lectura y envío |
 | Consulta del estado | Cada 750 ms | Cada 500 ms, independiente del vídeo |
 | Confirmación de una etiqueta | Tres imágenes consecutivas | Tres imágenes consecutivas |
 
 **Versión 3.1-video:** reemplaza las fotos solicitadas cada 200 ms —un máximo teórico de 5 imágenes/s— por una conexión MJPEG continua en el puerto 81. La captura funciona al ritmo del sensor y el analizador toma las últimas imágenes cada 125 ms. El puerto 80 sigue atendiendo el panel, la calibración y los ajustes durante el vídeo. Recarga la página después de actualizar para recibir la interfaz nueva.
 
-**Comprobación final en la placa del usuario:** la prueba HTTP interna recibió **207 imágenes únicas en ocho segundos, unos 25,9 FPS**, mientras el reconocimiento siguió a **8,0 análisis/s** y la API respondió. Se observó captura entre 25,8 y 26,8 FPS, PSRAM de 8 MB y ningún error de cámara. La prueba interna usa la red de bucle local dentro de la placa: **no mide la fluidez ni el rendimiento Wi-Fi del teléfono**. El panel distingue la velocidad del vídeo y del reconocimiento; la velocidad visible depende también del enlace inalámbrico y del navegador.
+**Versión actual 3.2-recuperacion-video:** corrige la recuperación de un vídeo congelado. Las peticiones de vídeo se atienden en tareas asíncronas; una nueva conexión puede reemplazar la anterior sin ocupar el servidor HTTP. El último visor tiene prioridad. Un cliente que no consigue recibir una imagen completa en un segundo se desconecta y libera sus buffers. El panel detecta tres segundos sin imágenes enviadas, reintenta y renueva la conexión cada 30 segundos, incluso si el navegador no emite un error. También recupera el vídeo al regresar a la pestaña o recuperar Wi-Fi. Mantiene el análisis y la calibración de 3.1.
+
+La cámara reserva unos **96 KB por framebuffer en PSRAM**, en lugar de los 15 KB que asigna el driver al iniciar directamente en QVGA. Se inicializa en SVGA para reservar ese espacio y luego se configura el sensor en **320 × 240**, siguiendo el patrón del ejemplo oficial. Cada captura se valida antes de enviarla y decodificarla: si contiene varios JPEG concatenados, se usa únicamente la última imagen completa con las dimensiones correctas. El clasificador mantiene su buffer pequeño y la misma zona de muestreo.
+
+La [verificación de 3.2](docs/recuperacion-video.md) incluye reconexiones con un visor anterior abierto, clientes que dejan de leer y expiración de sesiones. La prueba interna usa TCP de bucle local dentro de la placa: **no mide la fluidez ni el rendimiento Wi-Fi del teléfono**. El panel distingue la velocidad del vídeo y del reconocimiento; la velocidad visible depende también del enlace inalámbrico y del navegador.
 
 Los buffers grandes aprovechan la PSRAM. La imagen pequeña de análisis usa RAM interna cuando hay espacio, con PSRAM como alternativa. La cuadrícula de color sigue teniendo 40 × 30 puntos. La flash de 8 MB usa la partición oficial `default_8MB`: dos espacios de aplicación de unos 3,2 MB y un espacio de archivos reservado. Este firmware no implementa actualización por Wi-Fi ni usa todavía ese espacio de archivos.
 
@@ -71,7 +75,7 @@ Es necesario calibrar esta placa desde cero: no importa automáticamente los dat
 
 El sistema compara **color de pelaje en una escena fija**; no incorpora un detector neuronal de gatos. Una mano o tela de color parecido puede coincidir. Los perfiles demasiado similares producen «Indeterminado» y se pueden volver a aprender. Las pruebas sintéticas no miden precisión con gatos reales.
 
-La actualización de 3.0 a 3.1 conserva el formato de calibración, el algoritmo y los ajustes. Usa `-SoloAplicacion` para mantener los registros guardados.
+La actualización de 3.0 o 3.1 a 3.2 conserva el formato de calibración, el algoritmo y los ajustes. Usa `-SoloAplicacion` para mantener los registros guardados. Recarga la página para activar la recuperación automática.
 
 Para conectarla a tu red de 2,4 GHz, copia `config.local.example.h` como `config.local.h` y completa `WIFI_SSID` y `WIFI_PASSWORD`. La IP se imprime por USB a 115200 baudios. Si no conecta en 15 segundos, crea su propia red.
 
@@ -89,11 +93,16 @@ En Developer PowerShell for Visual Studio, o con g++ en PATH:
 
 ```powershell
 .\tests\run-tests.ps1
+
+# Recuperación de la interfaz; requiere Node.js.
+node .\tests\web_ui_test.cjs
 ```
 
-El registro de comprobación está en `docs/verificacion.md` y la corrección del vídeo en `docs/video-fluido.md`. La API conserva `/capture`, `/api/status`, `/api/learn`, `/api/settings` y `/api/reset`; las acciones se encolan y responden `202`. Consulta `busy` y `message` para conocer su finalización. `/api/status` incluye `fps` para reconocimiento, `videoFps` para captura, `streamFps` para envío de vídeo, `streamClients`, `streamPort`, `videoFrame`, `videoAgeMs`, `previewDrops`, tiempos y memoria.
+El registro de comprobación inicial está en `docs/verificacion.md`, la mejora de fluidez en `docs/video-fluido.md` y la recuperación en `docs/recuperacion-video.md`. La API conserva `/capture`, `/api/status`, `/api/learn`, `/api/settings` y `/api/reset`; las acciones se encolan y responden `202`. Consulta `busy` y `message` para conocer su finalización. `/api/status` incluye `fps` para reconocimiento, `videoFps` para captura, `streamFps` para envío de vídeo, `streamClients`, `streamPort`, `videoFrame`, `videoAgeMs`, `previewDrops`, tiempos y memoria. La versión 3.2 añade `streamFrame`, `streamAgeMs`, `streamStarts` y `streamTimeouts` para detectar progreso y diagnosticar reconexiones, y `mergedJpegs` para contar capturas con varias imágenes.
 
-El flujo se abre en `http://192.168.4.1:81/stream`. Se recomienda un visor de vídeo a la vez. Para una comprobación técnica por USB, escribe **t** en el monitor serie: ejecuta una prueba HTTP interna de ocho segundos, consulta el estado durante el vídeo y muestra un resultado `SELFTEST`. Hazla sin otro visor de vídeo abierto; no modifica la calibración ni cambia la red del computador.
+El flujo se abre en `http://192.168.4.1:81/stream`. Se recomienda un visor de vídeo a la vez. El panel renueva la conexión automáticamente; si abres el flujo directo, termina a los 35 segundos y debes volver a abrirlo.
+
+Para una comprobación técnica por USB, escribe **t** en el monitor serie: ejecuta una prueba HTTP interna de ocho segundos, consulta el estado durante el vídeo y muestra un resultado `SELFTEST`. Escribe **r** para probar relevos de conexiones, clientes que dejan de leer y una sesión larga; tarda aproximadamente 100 segundos y muestra `RECONNECTTEST` y `RECONNECTHEAP`. Haz las pruebas sin otro visor abierto; no modifican la calibración ni cambian la red del computador.
 
 ## Referencias oficiales
 
@@ -101,3 +110,4 @@ El flujo se abre en `http://192.168.4.1:81/stream`. Se recomienda un visor de v�
 - [Seeed: cámara, pines y PSRAM](https://wiki.seeedstudio.com/xiao_esp32s3_camera_usage/).
 - [Espressif: esp32-camera, JPEG y buffers](https://github.com/espressif/esp32-camera).
 - [Espressif: pines XIAO en CameraWebServer](https://github.com/espressif/arduino-esp32/blob/3.3.2/libraries/ESP32/examples/Camera/CameraWebServer/camera_pins.h).
+- [Espressif: peticiones HTTP asíncronas](https://docs.espressif.com/projects/esp-idf/en/v5.5.1/esp32s3/api-reference/protocols/esp_http_server.html).

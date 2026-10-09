@@ -1,6 +1,6 @@
 # Binarios para XIAO ESP32S3 Sense
 
-Firmware `3.1-video`, Arduino-ESP32 3.3.2, CPU 240 MHz, flash QIO 80 MHz y PSRAM OPI. El encabezado de la imagen usa DIO para el arranque, como la receta oficial QIO de esta placa.
+Firmware `3.2-recuperacion-video`, Arduino-ESP32 3.3.2, CPU 240 MHz, flash QIO 80 MHz y PSRAM OPI. El encabezado de la imagen usa DIO para el arranque, como la receta oficial QIO de esta placa.
 
 | Archivo | Dirección |
 |---|---|
