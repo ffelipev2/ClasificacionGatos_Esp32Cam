@@ -1,0 +1,14 @@
+{
+  "frames": 895,
+  "fps": 14.9,
+  "duplicates": 2,
+  "failures": 0,
+  "api": 11,
+  "recognition": 8.0,
+  "cameraErrors": 0,
+  "calibration": 1,
+  "bg": 1,
+  "orange": 8,
+  "gray": 8,
+  "driverOverflowWarnings": 0
+}

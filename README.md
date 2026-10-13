@@ -7,7 +7,7 @@ Hay dos proyectos independientes. Elige el correspondiente a tu placa:
 | Placa | Versión | Proyecto | Instrucciones |
 |---|---|---|---|
 | ESP32-CAM AI Thinker, OV2640 y PSRAM | `2.0-calibracion` | [firmware/ESP32CAMGatos](firmware/ESP32CAMGatos) | [Manual ESP32-CAM](docs/esp32cam.md) |
-| Seeed XIAO ESP32S3 Sense, 8 MB de flash y PSRAM OPI | `3.2-recuperacion-video` | [seeed-s3](seeed-s3) | [Manual XIAO Sense](seeed-s3/README.md) |
+| Seeed XIAO ESP32S3 Sense, 8 MB de flash y PSRAM OPI | `3.3-vista-estable` | [seeed-s3](seeed-s3) | [Manual XIAO Sense](seeed-s3/README.md) |
 
 El sistema aprende colores dentro de una zona fija de la imagen. Supone que un solo gato ocupa esa zona; una mano, tela u objeto de color parecido también puede coincidir. No incorpora un detector neuronal de gatos ni identifica individuos de igual color.
 
@@ -29,25 +29,25 @@ Desde la raíz de este repositorio, con las herramientas ESP32 de Arduino instal
 .\seeed-s3\cargar.ps1 -Port COM30 -SoloAplicacion
 ```
 
-Sustituye `COM30` por el puerto de tu placa. Para una instalación nueva, usa el mismo comando sin `-SoloAplicacion`. El script verifica chip, flash y hashes de los binarios, respalda NVS y carga el firmware. La actualización de **3.0 o 3.1 a 3.2 conserva los registros de calibración**.
+Sustituye `COM30` por el puerto de tu placa. Para una instalación nueva, usa el mismo comando sin `-SoloAplicacion`. El script verifica chip, flash y hashes de los binarios, respalda NVS y carga el firmware. La actualización de **3.0, 3.1 o 3.2 a 3.3 conserva los registros de calibración**.
 
-## Vídeo continuo en la versión S3
+## Vista estable en la versión S3
 
-La versión S3 usa vídeo continuo desde `3.1-video`. La versión actual, `3.2-recuperacion-video`, añade recuperación cuando la imagen se queda congelada:
+La versión `3.3-vista-estable` corrige la vista que se iba a negro al reintentar una conexión o al fallar una consulta de estado:
 
 - Captura JPEG continuamente, mientras otra tarea analiza la última imagen disponible cada 125 ms.
 - Reserva unos 96 KB en PSRAM por framebuffer de cámara, en lugar de 15 KB, manteniendo la imagen en 320 × 240. Si una captura contiene varias imágenes JPEG, envía y analiza solo la última completa, con dimensiones verificadas.
 - Usa seis buffers de vista en PSRAM para evitar sobrescribir imágenes que se están leyendo o enviando, también durante una reconexión.
-- Mantiene una conexión **MJPEG en el puerto 81** y atiende el panel y la calibración en el **puerto 80**.
-- Permite reemplazar una conexión antigua sin esperar a que termine. El último visor abierto tiene prioridad.
-- Limita a un segundo el envío completo de cada imagen; libera clientes que dejan de leer y sus buffers.
-- Detecta falta de progreso durante tres segundos, reintenta y renueva la conexión cada 30 segundos. Pausa el vídeo al ocultar la pestaña y lo recupera al volver.
+- El panel solicita una imagen JPEG completa de una en una al **puerto 81**, hasta unas **15 imágenes/s**. El ritmo se adapta al tiempo de recepción y decodificación de la tablet.
+- Dibuja cada imagen válida en un canvas y conserva la anterior mientras recibe la siguiente. Las imágenes incompletas, los cortes de red y los errores de estado no vacían la vista.
+- Mantiene el panel y la calibración en el **puerto 80**. Una consulta de estado que tarda 10 segundos no detiene las imágenes.
+- Pausa al ocultar la página y vuelve a pedir imágenes al regresar. Ya no renueva periódicamente la conexión de vista del panel.
 
-En la prueba HTTP interna de la versión 3.2 se recibieron **205 imágenes únicas en ocho segundos: 25,6 FPS**, con **8,0 análisis por segundo**, respuesta de la API y cero duplicados. También pasaron **11 relevos de conexiones y 11 recuperaciones de clientes detenidos**. Esa prueba usa TCP local dentro de la placa; la fluidez visible en el teléfono también depende del Wi-Fi y del navegador.
+La prueba en un navegador real con tamaño de tablet conservó la imagen durante consultas de estado bloqueadas por 11 segundos, respuestas HTTP 503, JPEG corruptos y transferencias incompletas. Los resultados y la prueba interna de la placa se documentan en la [verificación de 3.3](seeed-s3/docs/vista-estable.md). La fluidez visible en la tablet depende también de su Wi-Fi y navegador.
 
-La [verificación de recuperación](seeed-s3/docs/recuperacion-video.md) documenta las pruebas de conexiones antiguas, clientes detenidos y expiración de sesiones de la versión 3.2.
+La [verificación de 3.2](seeed-s3/docs/recuperacion-video.md) conserva el registro de la recuperación del servidor MJPEG.
 
-El flujo directo está en **http://192.168.4.1:81/stream**. Se recomienda un visor de vídeo a la vez. El panel renueva el flujo automáticamente; al usar la URL directa, la sesión termina después de 35 segundos y debes volver a abrirla.
+Para el uso habitual abre **http://192.168.4.1** y comprueba que el pie diga **Vista 3.3**. La foto directa está en **http://192.168.4.1:81/frame**. Se conserva el flujo MJPEG en `/stream` para diagnóstico; esa sesión termina después de 35 segundos y requiere volver a abrirla. Se recomienda un visor a la vez.
 
 ## ESP32-CAM AI Thinker
 
@@ -63,9 +63,9 @@ Las conexiones GPIO0–GND para programar, alimentación, calibración y actuali
 |---|---|---|
 | Proyecto completo | [ESP32CAM-Gatos.zip](ESP32CAM-Gatos.zip) | [XIAO-ESP32S3-Sense-Gatos.zip](XIAO-ESP32S3-Sense-Gatos.zip) |
 | Binarios e instrucciones de carga | [dist](dist/README.md) | [seeed-s3/dist](seeed-s3/dist/README.md) |
-| Configuración PlatformIO | [platformio.ini](platformio.ini) | [seeed-s3/platformio.ini](seeed-s3/platformio.ini) |
+| Configuración PlatformIO | [platformio.ini](platformio.ini) | [Referencia histórica; no compatible con 3.3](seeed-s3/platformio.ini) |
 
-La compilación verificada usa **Arduino-ESP32 3.3.2**. Las configuraciones PlatformIO incluyen su versión de plataforma y sus límites de comprobación en cada manual. Para usar una red Wi-Fi propia, copia el `config.local.example.h` del firmware elegido como `config.local.h`; las credenciales locales están excluidas de Git.
+La compilación verificada usa **Arduino-ESP32 3.3.2**. Para la XIAO utiliza Arduino IDE o CLI; su configuración PlatformIO antigua necesita migrarse al core actual, como se explica en el [manual](seeed-s3/README.md#compilación-y-pruebas). Para usar una red Wi-Fi propia, copia el `config.local.example.h` del firmware elegido como `config.local.h`; las credenciales locales están excluidas de Git.
 
 ## Pruebas
 

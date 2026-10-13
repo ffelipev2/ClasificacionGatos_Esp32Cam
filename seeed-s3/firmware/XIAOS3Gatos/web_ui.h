@@ -9,7 +9,8 @@ static const char WEB_UI[] PROGMEM = R"HTML(<!doctype html>
 h1{font-size:26px;margin:0 0 8px}h2{font-size:18px;margin:0 0 14px}p{line-height:1.5;color:#bbc8d6}
 .layout{display:grid;grid-template-columns:1.3fr 1fr;gap:18px}.card{background:#1a2532;border:1px solid #324254;border-radius:16px;padding:20px}
 .camera{position:relative;background:#070c12;aspect-ratio:4/3;border-radius:10px;overflow:hidden}
-img{display:block;width:100%;height:100%;object-fit:contain}.roi{position:absolute;border:2px dashed #6fe1ad;pointer-events:none}
+canvas{display:block;width:100%;height:100%;object-fit:contain}.roi{position:absolute;border:2px dashed #6fe1ad;pointer-events:none}
+#previewState{position:absolute;bottom:8px;left:8px;padding:4px 8px;border-radius:5px;background:#101720dd;color:#ebf0f6;font-size:12px}
 .status{font-size:26px;font-weight:700;margin:16px 0 6px}.orange{color:#ffb166}.gray{color:#d5dde5}.muted{color:#b7c6d6}
 .meta{font-size:14px;color:#aebed0;line-height:1.6}.row{display:flex;gap:8px;flex-wrap:wrap}
 button{font:inherit;border:1px solid #4a6077;color:#f0f5fa;background:#31465e;border-radius:9px;padding:11px 14px;cursor:pointer}
@@ -25,7 +26,7 @@ label{font-size:14px;color:#bbc8d6}input{display:block;width:100%;padding:8px;ma
 <h1>XIAO ESP32S3 Sense · Naranja o gris</h1>
 <p>Clasificación del pelaje en la zona marcada. Todo el análisis ocurre en la placa.</p>
 <div class="layout"><section class="card" aria-label="Cámara y resultado">
-<div class="camera"><img id="preview" alt="Vista de la cámara"><div class="roi" id="roi"></div></div>
+<div class="camera"><canvas id="preview" width="320" height="240" role="img" aria-label="Vista de la cámara"></canvas><div class="roi" id="roi"></div><span id="previewState">Esperando imagen…</span></div>
 <div class="status muted" id="result" aria-live="polite">Conectando…</div>
 <div class="meta" id="metrics">Esperando imagen</div>
 <div class="meta" id="performance"></div>
@@ -50,42 +51,83 @@ label{font-size:14px;color:#bbc8d6}input{display:block;width:100%;padding:8px;ma
 <label>Diferencia con el fondo (5–80)<input name="difference" type="number" min="5" max="80" required></label>
 <label>Área mínima ocupada (%)<input name="minForeground" type="number" min="5" max="80" required></label>
 </div><button type="submit">Guardar ajustes</button></form></details>
-<footer>Sin servicios externos ni conexión a internet. Calibración guardada en la memoria de la ESP32.</footer>
+<footer>Vista 3.3 · Sin servicios externos ni conexión a internet. Calibración guardada en la memoria de la ESP32.</footer>
 </main><script>
 const $=id=>document.getElementById(id);
 const labels={sin_calibrar:'Falta calibración',sin_objeto:'Zona vacía',naranja:'Pelaje naranja',gris:'Pelaje gris',indeterminado:'Indeterminado',poca_luz:'Muy poca luz',error_camara:'Error de cámara'};
-let initialized=false,offline=false,lastOptions='',streamUrl='',streamRetry=null,streamStarted=0,streamEnabled=false,streamFrame=0,streamProgressAt=0;
+let initialized=false,offline=false,lastOptions='',previewUrl='',previewTimer=null,previewController=null,previewRunning=false,previewEnabled=false,previewEpoch=0,previewInterval=67,previewFrame=0,previewGoodAt=0,previewFps=0,previewRateAt=0,previewRateFrames=0,pageActive=true;
+const previewCanvas=$('preview'),previewContext=previewCanvas.getContext('2d');
 async function json(url,options={}){
-  const response=await fetch(url,{cache:'no-store',...options,signal:AbortSignal.timeout(10000)});
-  const body=await response.json();if(!response.ok)throw Error(body.message||'No se pudo completar la acción');return body;
+  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),10000);
+  try{const response=await fetch(url,{cache:'no-store',...options,signal:controller.signal});
+    const body=await response.json();if(!response.ok)throw Error(body.message||'No se pudo completar la acción');return body;
+  }finally{clearTimeout(timeout)}
 }
 function setBusy(busy){document.querySelectorAll('button').forEach(b=>b.disabled=busy)}
-function startStream(){
-  if(!streamEnabled||!streamUrl||document.hidden)return;
-  clearTimeout(streamRetry);streamRetry=null;streamStarted=Date.now();streamProgressAt=streamStarted;streamFrame=0;
-  $('preview').removeAttribute('src');
-  $('preview').src=streamUrl+'?t='+streamStarted;
+function previewMessage(text){$('previewState').textContent=text;$('previewState').hidden=!text}
+function schedulePreview(delay=0){
+  if(!previewEnabled||!pageActive||document.hidden||previewRunning||previewTimer!==null)return;
+  previewTimer=setTimeout(()=>{previewTimer=null;previewTick()},delay);
 }
-function stopStream(){clearTimeout(streamRetry);streamRetry=null;$('preview').removeAttribute('src')}
-function retryStream(){if(!streamEnabled||streamRetry!==null||document.hidden)return;$('preview').removeAttribute('src');streamRetry=setTimeout(startStream,1000)}
-function checkStream(s){
-  if(!streamEnabled||document.hidden||streamRetry!==null)return;
-  const now=Date.now();
-  if(s.streamFrame&&s.streamFrame!==streamFrame){streamFrame=s.streamFrame;streamProgressAt=now}
-  // Un MJPEG detenido puede conservar la última imagen sin disparar onerror.
-  // Renovar también periódicamente por si el navegador dejó de renderizar.
-  if(now-streamProgressAt>3000||now-streamStarted>=30000)retryStream();
+function startPreview(){schedulePreview()}
+function stopPreview(){
+  ++previewEpoch;clearTimeout(previewTimer);previewTimer=null;
+  if(previewController)previewController.abort();
+  previewMessage(previewGoodAt?'Vídeo en pausa':'Esperando imagen…');
 }
-$('preview').onerror=retryStream;
-document.addEventListener('visibilitychange',()=>{if(document.hidden)stopStream();else startStream()});
-window.addEventListener('pagehide',stopStream);
-window.addEventListener('pageshow',()=>{if(streamEnabled)startStream()});
+async function decodePreview(blob,signal){
+  if(typeof createImageBitmap==='function'){
+    try{return await createImageBitmap(blob)}catch(error){/* Compatibilidad con tablets antiguas. */}
+  }
+  return await new Promise((resolve,reject)=>{
+    const image=new Image(),url=URL.createObjectURL(blob);
+    const cleanup=()=>{URL.revokeObjectURL(url);signal.removeEventListener('abort',cancel);image.onload=null;image.onerror=null};
+    const cancel=()=>{cleanup();image.src='';reject(Error('Imagen cancelada'))};
+    image.onload=()=>{cleanup();resolve(image)};
+    image.onerror=()=>{cleanup();reject(Error('Imagen incompleta'))};
+    if(signal.aborted){cancel();return}signal.addEventListener('abort',cancel,{once:true});image.src=url;
+  });
+}
+async function previewTick(){
+  if(previewRunning||!previewEnabled||!pageActive||document.hidden)return;
+  previewRunning=true;
+  const epoch=previewEpoch,started=Date.now(),controller=new AbortController();previewController=controller;
+  const timeout=setTimeout(()=>controller.abort(),5000);let image=null,delay=previewInterval;
+  try{
+    const response=await fetch(previewUrl+'?t='+started,{cache:'no-store',signal:controller.signal});
+    if(!response.ok)throw Error('Esperando la cámara');
+    const frame=Number(response.headers.get('X-Frame-Number'));
+    const blob=await response.blob();
+    if(!blob.size||blob.size>98304)throw Error('Imagen incompleta');
+    if(frame&&frame===previewFrame){if(Date.now()-previewGoodAt>3000)previewMessage('Esperando una imagen nueva…');return}
+    image=await decodePreview(blob,controller.signal);
+    if(controller.signal.aborted||epoch!==previewEpoch||!pageActive||document.hidden)return;
+    if((image.naturalWidth||image.width)!==320||(image.naturalHeight||image.height)!==240)throw Error('Dimensiones de imagen inválidas');
+    // No borrar ni redimensionar el canvas: la última imagen permanece
+    // visible hasta que otra se haya recibido y decodificado por completo.
+    previewContext.drawImage(image,0,0,320,240);
+    previewFrame=frame;previewGoodAt=Date.now();previewMessage('');
+    if(!previewRateAt)previewRateAt=previewGoodAt;
+    ++previewRateFrames;
+    if(previewGoodAt-previewRateAt>=1000){previewFps=previewRateFrames*1000/(previewGoodAt-previewRateAt);previewRateAt=previewGoodAt;previewRateFrames=0}
+  }catch(error){
+    if(epoch===previewEpoch&&pageActive&&!document.hidden)previewMessage(previewGoodAt?'Reconectando vídeo · última imagen conservada':'Conectando con la cámara…');
+    delay=250;
+  }finally{
+    if(image&&typeof image.close==='function')image.close();
+    clearTimeout(timeout);previewController=null;previewRunning=false;
+    schedulePreview(Math.max(0,delay-(Date.now()-started)));
+  }
+}
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stopPreview();else startPreview()});
+window.addEventListener('pagehide',()=>{pageActive=false;stopPreview()});
+window.addEventListener('pageshow',()=>{pageActive=true;startPreview()});
 async function poll(){
   try{
-    const s=await json('/api/status');const recovered=offline;offline=false;
+    const s=await json('/api/status');offline=false;
     $('result').textContent=s.busy?'Registrando '+s.job+'…':(labels[s.label]||s.label);
     $('result').className='status '+(s.label==='naranja'?'orange':s.label==='gris'?'gray':'muted');
-    $('metrics').textContent='Zona ocupada: '+Math.round(s.foreground*100)+'% · Píxeles útiles: '+Math.round((s.useful||0)*100)+'% · Imagen '+s.frame+(s.frame?' · Hace '+(s.ageMs/1000).toFixed(1)+' s':'')+' · Reconocimiento '+s.fps.toFixed(1)+'/s · Vídeo '+(s.streamClients?s.streamFps:s.videoFps).toFixed(1)+' FPS';
+    $('metrics').textContent='Zona ocupada: '+Math.round(s.foreground*100)+'% · Píxeles útiles: '+Math.round((s.useful||0)*100)+'% · Imagen '+s.frame+(s.frame?' · Hace '+(s.ageMs/1000).toFixed(1)+' s':'')+' · Reconocimiento '+s.fps.toFixed(1)+'/s · Vista '+(previewGoodAt&&Date.now()-previewGoodAt<3000?previewFps:0).toFixed(1)+' FPS';
     $('performance').textContent='Análisis '+s.analysisMs.toFixed(1)+' ms · Decodificación '+s.decodeMs.toFixed(1)+' ms · PSRAM libre '+(s.freePsram/1048576).toFixed(1)+' MB';
     $('bgCount').textContent=s.background?'Registrado':'Pendiente';
     $('orangeCount').textContent=s.orangeSamples+' imágenes';$('grayCount').textContent=s.graySamples+' imágenes';
@@ -94,11 +136,11 @@ async function poll(){
     if(!initialized||lastOptions!==JSON.stringify(s.options)){lastOptions=JSON.stringify(s.options);for(const [key,value]of Object.entries(s.options)){const input=$('settings').elements.namedItem(key);if(input)input.value=value}initialized=true}
     const r=$('roi');r.style.left=s.options.x+'%';r.style.top=s.options.y+'%';r.style.width=s.options.width+'%';r.style.height=s.options.height+'%';
     if(s.streamPort&&s.videoFrame){
-      const url=new URL(location.href);url.port=s.streamPort;url.pathname='/stream';url.search='';url.hash='';
-      if(!streamEnabled||streamUrl!==url.href||recovered){streamUrl=url.href;streamEnabled=true;startStream()}
-      else checkStream(s);
+      const url=new URL(location.href);url.port=s.streamPort;url.pathname='/frame';url.search='';url.hash='';
+      if(previewUrl!==url.href){stopPreview();previewUrl=url.href;previewFrame=0}
+      previewInterval=Math.max(67,Number(s.previewIntervalMs)||67);previewEnabled=true;startPreview();
     }
-  }catch(error){offline=true;stopStream();$('result').textContent='Sin conexión con la placa';$('result').className='status muted';$('notice').textContent=error.message;setBusy(true)}
+  }catch(error){offline=true;$('result').textContent='Reintentando el estado de la placa';$('result').className='status muted';$('notice').textContent=error.message;setBusy(true)}
   setTimeout(poll,offline?2000:500);
 }
 document.querySelectorAll('[data-learn]').forEach(b=>b.onclick=async()=>{

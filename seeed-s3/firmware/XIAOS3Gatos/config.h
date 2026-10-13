@@ -18,11 +18,13 @@
 #define AP_PASSWORD "gatos2026"
 #endif
 
-constexpr const char *FIRMWARE_VERSION = "3.2-recuperacion-video";
+constexpr const char *FIRMWARE_VERSION = "3.3-vista-estable";
 constexpr unsigned long CAPTURE_INTERVAL_MS = 125;  // Objetivo: 8 análisis/s.
 constexpr uint16_t STREAM_PORT = 81;
 constexpr unsigned long STREAM_SEND_TIMEOUT_MS = 1000;
 constexpr unsigned long STREAM_SESSION_MS = 35000;
+constexpr unsigned long PREVIEW_SEND_TIMEOUT_MS = 5000;
+constexpr unsigned long PREVIEW_INTERVAL_MS = 67;  // Máximo: unas 15 imágenes/s.
 constexpr unsigned long LEARNING_INTERVAL_MS = 250;
 constexpr unsigned CALIBRATION_FRAMES = 8;
 constexpr unsigned MAX_CALIBRATION_ATTEMPTS = 80;

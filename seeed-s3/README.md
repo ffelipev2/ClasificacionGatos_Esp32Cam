@@ -8,7 +8,7 @@ Versión independiente del proyecto ESP32-CAM, optimizada para **Seeed Studio XI
 |---|---|---|
 | Intervalo objetivo de análisis | 500 ms | 125 ms, hasta 8 análisis/s |
 | Decodificación RGB565 | 320 × 240, 153 600 bytes | 160 × 120, 38 400 bytes |
-| Vista del navegador | Fotos periódicas, JPEG 320 × 240 | Vídeo MJPEG continuo, 320 × 240 |
+| Vista del navegador | Fotos periódicas, JPEG 320 × 240 | JPEG completos en canvas, 320 × 240, hasta unas 15 imágenes/s |
 | Cámara y servidor | En el mismo bucle | Captura y análisis independientes; vídeo y API en servidores separados |
 | Buffers de vista | Uno | Seis en PSRAM, protegidos durante lectura y envío |
 | Consulta del estado | Cada 750 ms | Cada 500 ms, independiente del vídeo |
@@ -16,11 +16,11 @@ Versión independiente del proyecto ESP32-CAM, optimizada para **Seeed Studio XI
 
 **Versión 3.1-video:** reemplaza las fotos solicitadas cada 200 ms —un máximo teórico de 5 imágenes/s— por una conexión MJPEG continua en el puerto 81. La captura funciona al ritmo del sensor y el analizador toma las últimas imágenes cada 125 ms. El puerto 80 sigue atendiendo el panel, la calibración y los ajustes durante el vídeo. Recarga la página después de actualizar para recibir la interfaz nueva.
 
-**Versión actual 3.2-recuperacion-video:** corrige la recuperación de un vídeo congelado. Las peticiones de vídeo se atienden en tareas asíncronas; una nueva conexión puede reemplazar la anterior sin ocupar el servidor HTTP. El último visor tiene prioridad. Un cliente que no consigue recibir una imagen completa en un segundo se desconecta y libera sus buffers. El panel detecta tres segundos sin imágenes enviadas, reintenta y renueva la conexión cada 30 segundos, incluso si el navegador no emite un error. También recupera el vídeo al regresar a la pestaña o recuperar Wi-Fi. Mantiene el análisis y la calibración de 3.1.
+**Versión actual 3.3-vista-estable:** conserva la última imagen hasta recibir y decodificar la siguiente. El panel pide JPEG completos a `/frame` en el puerto 81, con una sola petición pendiente y un máximo de unas 15 imágenes/s. Ajusta el ritmo al tiempo real de recepción y decodificación. Un error del estado, de red o de una imagen no borra la vista; muestra un aviso mientras reintenta. Ya no fuerza renovaciones periódicas del visor del panel. Al ocultar/regresar a la página pausa y recupera las peticiones. El análisis y la calibración permanecen en la placa, con el mismo objetivo de ocho análisis/s.
 
 La cámara reserva unos **96 KB por framebuffer en PSRAM**, en lugar de los 15 KB que asigna el driver al iniciar directamente en QVGA. Se inicializa en SVGA para reservar ese espacio y luego se configura el sensor en **320 × 240**, siguiendo el patrón del ejemplo oficial. Cada captura se valida antes de enviarla y decodificarla: si contiene varios JPEG concatenados, se usa únicamente la última imagen completa con las dimensiones correctas. El clasificador mantiene su buffer pequeño y la misma zona de muestreo.
 
-La [verificación de 3.2](docs/recuperacion-video.md) incluye reconexiones con un visor anterior abierto, clientes que dejan de leer y expiración de sesiones. La prueba interna usa TCP de bucle local dentro de la placa: **no mide la fluidez ni el rendimiento Wi-Fi del teléfono**. El panel distingue la velocidad del vídeo y del reconocimiento; la velocidad visible depende también del enlace inalámbrico y del navegador.
+La [verificación de 3.3](docs/vista-estable.md) incluye pruebas reales del navegador con fallos de estado y de imágenes, y comprobaciones de la ruta JPEG en la placa. La [verificación de 3.2](docs/recuperacion-video.md) documenta el servidor MJPEG conservado para diagnóstico. Las pruebas internas usan TCP local: **no miden el rendimiento Wi-Fi de la tablet**. La velocidad «Vista» del panel cuenta imágenes dibujadas, mientras «Reconocimiento» mide el análisis en la placa.
 
 Los buffers grandes aprovechan la PSRAM. La imagen pequeña de análisis usa RAM interna cuando hay espacio, con PSRAM como alternativa. La cuadrícula de color sigue teniendo 40 × 30 puntos. La flash de 8 MB usa la partición oficial `default_8MB`: dos espacios de aplicación de unos 3,2 MB y un espacio de archivos reservado. Este firmware no implementa actualización por Wi-Fi ni usa todavía ese espacio de archivos.
 
@@ -75,7 +75,7 @@ Es necesario calibrar esta placa desde cero: no importa automáticamente los dat
 
 El sistema compara **color de pelaje en una escena fija**; no incorpora un detector neuronal de gatos. Una mano o tela de color parecido puede coincidir. Los perfiles demasiado similares producen «Indeterminado» y se pueden volver a aprender. Las pruebas sintéticas no miden precisión con gatos reales.
 
-La actualización de 3.0 o 3.1 a 3.2 conserva el formato de calibración, el algoritmo y los ajustes. Usa `-SoloAplicacion` para mantener los registros guardados. Recarga la página para activar la recuperación automática.
+La actualización de 3.0, 3.1 o 3.2 a 3.3 conserva el formato de calibración, el algoritmo y los ajustes. Usa `-SoloAplicacion` para mantener los registros guardados. Recarga la página y comprueba que el pie diga **Vista 3.3**.
 
 Para conectarla a tu red de 2,4 GHz, copia `config.local.example.h` como `config.local.h` y completa `WIFI_SSID` y `WIFI_PASSWORD`. La IP se imprime por USB a 115200 baudios. Si no conecta en 15 segundos, crea su propia red.
 
@@ -87,7 +87,7 @@ Con Arduino CLI y el core indicado instalados:
 .\compilar.ps1
 ```
 
-También incluye `platformio.ini` para `seeed_xiao_esp32s3`, PSRAM OPI y flash de 8 MB. La alternativa PlatformIO usa espressif32 6.13.0 / Arduino 2.0.17 y **no fue compilada en esta sesión**; los binarios entregados se verificaron con Arduino-ESP32 3.3.2.
+El `platformio.ini` se conserva como referencia histórica de espressif32 6.13.0 / Arduino 2.0.17. **No es compatible con la versión actual**: ese [SDK no incluye las APIs HTTP asíncronas](https://raw.githubusercontent.com/espressif/arduino-esp32/2.0.17/tools/sdk/esp32s3/include/esp_http_server/include/esp_http_server.h) utilizadas por el servidor. Para compilar la XIAO usa **Arduino IDE o CLI con Arduino-ESP32 3.3.2**. La migración de PlatformIO a ese core queda pendiente; los binarios entregados se verificaron con 3.3.2.
 
 En Developer PowerShell for Visual Studio, o con g++ en PATH:
 
@@ -100,9 +100,9 @@ node .\tests\web_ui_test.cjs
 
 El registro de comprobación inicial está en `docs/verificacion.md`, la mejora de fluidez en `docs/video-fluido.md` y la recuperación en `docs/recuperacion-video.md`. La API conserva `/capture`, `/api/status`, `/api/learn`, `/api/settings` y `/api/reset`; las acciones se encolan y responden `202`. Consulta `busy` y `message` para conocer su finalización. `/api/status` incluye `fps` para reconocimiento, `videoFps` para captura, `streamFps` para envío de vídeo, `streamClients`, `streamPort`, `videoFrame`, `videoAgeMs`, `previewDrops`, tiempos y memoria. La versión 3.2 añade `streamFrame`, `streamAgeMs`, `streamStarts` y `streamTimeouts` para detectar progreso y diagnosticar reconexiones, y `mergedJpegs` para contar capturas con varias imágenes.
 
-El flujo se abre en `http://192.168.4.1:81/stream`. Se recomienda un visor de vídeo a la vez. El panel renueva la conexión automáticamente; si abres el flujo directo, termina a los 35 segundos y debes volver a abrirlo.
+El panel habitual está en `http://192.168.4.1`; usa JPEG completos de `http://192.168.4.1:81/frame`. La API añade `previewIntervalMs`. Se conserva el diagnóstico MJPEG en `http://192.168.4.1:81/stream`, que termina a los 35 segundos y requiere volver a abrirlo. Se recomienda un visor a la vez.
 
-Para una comprobación técnica por USB, escribe **t** en el monitor serie: ejecuta una prueba HTTP interna de ocho segundos, consulta el estado durante el vídeo y muestra un resultado `SELFTEST`. Escribe **r** para probar relevos de conexiones, clientes que dejan de leer y una sesión larga; tarda aproximadamente 100 segundos y muestra `RECONNECTTEST` y `RECONNECTHEAP`. Haz las pruebas sin otro visor abierto; no modifican la calibración ni cambian la red del computador.
+Para una comprobación técnica por USB, escribe **p** en el monitor serie: durante un minuto solicita JPEG completos con keep-alive, comprueba sus números y consulta la API; muestra `PREVIEWTEST`. Se conservan **t** (MJPEG, ocho segundos, `SELFTEST`) y **r** (relevos y sesión larga, unos 100 segundos, `RECONNECTTEST`). Haz las pruebas sin otro visor abierto; no modifican la calibración ni cambian la red del computador.
 
 ## Referencias oficiales
 

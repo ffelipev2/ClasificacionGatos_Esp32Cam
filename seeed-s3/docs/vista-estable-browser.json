@@ -1,0 +1,12 @@
+{
+  "viewport": "768x1024",
+  "statusTimeoutMs": 11200,
+  "photoUnavailable": true,
+  "corruptJpeg": true,
+  "partialJpegTimeout": true,
+  "recovered": true,
+  "blackCanvasSamples": 0,
+  "canvasClears": 0,
+  "maxPhotoActive": 1,
+  "pageErrors": []
+}

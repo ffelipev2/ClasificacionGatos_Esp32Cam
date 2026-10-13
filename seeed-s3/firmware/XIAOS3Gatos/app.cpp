@@ -584,6 +584,7 @@ void status() {
   out += ",\"streamTimeouts\":"; out += s.streamTimeouts;
   out += ",\"mergedJpegs\":"; out += s.mergedJpegs;
   out += ",\"streamPort\":"; out += streamServer ? STREAM_PORT : 0;
+  out += ",\"previewIntervalMs\":"; out += PREVIEW_INTERVAL_MS;
   out += ",\"previewDrops\":"; out += s.previewDrops;
   out += ",\"captureMs\":"; out += String(s.captureMs, 2);
   out += ",\"decodeMs\":"; out += String(s.decodeMs, 2);
@@ -676,6 +677,79 @@ struct StreamJob {
   uint32_t epoch = 0, sendStarted = 0;
   bool active = false, timedOut = false;
 } streamJobs[2];
+
+// /frame se atiende en la tarea HTTPD. Hay una sola foto en envío por esa
+// tarea; los trabajadores MJPEG siguen usando sus presupuestos separados.
+struct PhotoTransfer {
+  int socket = -1;
+  uint32_t started = 0;
+  bool active = false;
+} photoTransfer;
+
+int normalSocketSend(httpd_handle_t, int socket, const char *buf, size_t bytes, int flags) {
+  const int sent = send(socket, buf, bytes, flags);
+  return sent > 0 ? sent : HTTPD_SOCK_ERR_FAIL;
+}
+
+int boundedPhotoSend(httpd_handle_t, int socket, const char *buf, size_t bytes, int flags) {
+  for (;;) {
+    xSemaphoreTake(sharedMutex, portMAX_DELAY);
+    const bool current = photoTransfer.active && photoTransfer.socket == socket;
+    const bool expired = millis() - photoTransfer.started >= PREVIEW_SEND_TIMEOUT_MS;
+    xSemaphoreGive(sharedMutex);
+    if (!current) return HTTPD_SOCK_ERR_FAIL;
+    if (expired) return HTTPD_SOCK_ERR_TIMEOUT;
+    const int sent = send(socket, buf, bytes, flags | MSG_DONTWAIT);
+    if (sent > 0) return sent;
+    if (!sent || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+      return HTTPD_SOCK_ERR_FAIL;
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+}
+
+esp_err_t frameHandler(httpd_req_t *req) {
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "Access-Control-Expose-Headers", "X-Frame-Number");
+  size_t bytes;
+  uint32_t frame;
+  xSemaphoreTake(sharedMutex, portMAX_DELAY);
+  const int slot = previewPool.acquire(bytes, frame);
+  const bool recent = slot >= 0 && millis() - previewAt[slot] <= 2500;
+  xSemaphoreGive(sharedMutex);
+  if (!recent) {
+    if (slot >= 0) {
+      xSemaphoreTake(sharedMutex, portMAX_DELAY);
+      previewPool.release(slot);
+      xSemaphoreGive(sharedMutex);
+    }
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    return httpd_resp_send(req, "Esperando una imagen reciente.", HTTPD_RESP_USE_STRLEN);
+  }
+  const int socket = httpd_req_to_sockfd(req);
+  if (httpd_sess_set_send_override(req->handle, socket, boundedPhotoSend) != ESP_OK) {
+    xSemaphoreTake(sharedMutex, portMAX_DELAY);
+    previewPool.release(slot);
+    xSemaphoreGive(sharedMutex);
+    return ESP_FAIL;
+  }
+  xSemaphoreTake(sharedMutex, portMAX_DELAY);
+  photoTransfer.socket = socket;
+  photoTransfer.started = millis();
+  photoTransfer.active = true;
+  xSemaphoreGive(sharedMutex);
+  char number[16];
+  snprintf(number, sizeof(number), "%lu", static_cast<unsigned long>(frame));
+  httpd_resp_set_type(req, "image/jpeg");
+  httpd_resp_set_hdr(req, "X-Frame-Number", number);
+  const esp_err_t result = httpd_resp_send(req, reinterpret_cast<const char *>(previewBytes[slot]), bytes);
+  httpd_sess_set_send_override(req->handle, socket, normalSocketSend);
+  xSemaphoreTake(sharedMutex, portMAX_DELAY);
+  photoTransfer.active = false;
+  previewPool.release(slot);
+  xSemaphoreGive(sharedMutex);
+  return result;
+}
 
 // El timeout SO_SNDTIMEO limita cada send(), no la imagen completa. Un
 // cliente que lee muy despacio puede prolongar indefinidamente los envíos
@@ -846,6 +920,14 @@ void beginStreamServer() {
     httpd_stop(streamServer);
     streamServer = nullptr;
     Serial.println("No se pudo registrar el vídeo.");
+    return;
+  }
+  route.uri = "/frame";
+  route.handler = frameHandler;
+  if (httpd_register_uri_handler(streamServer, &route) != ESP_OK) {
+    httpd_stop(streamServer);
+    streamServer = nullptr;
+    Serial.println("No se pudo registrar la vista por imágenes.");
   }
 }
 void beginServer() {
@@ -1049,15 +1131,91 @@ void reconnectTestTask(void *) {
   xSemaphoreGive(sharedMutex);
   vTaskDelete(nullptr);
 }
+
+// 'p': la misma ruta JPEG del panel, a 15 solicitudes/s y con keep-alive.
+// Comprobar imágenes completas, números nuevos y API durante un minuto.
+void previewTestTask(void *) {
+  const Snapshot before = readSnapshot();
+  WiFiClient client;
+  client.setTimeout(1200);
+  uint32_t frames = 0, duplicates = 0, failures = 0, probes = 0, lastFrame = 0;
+  const uint32_t started = millis();
+  uint32_t lastProbe = started;
+  uint8_t buffer[1024];
+  while (millis() - started < 60000) {
+    const uint32_t requestAt = millis();
+    bool ok = client.connected() || client.connect(IPAddress(127, 0, 0, 1), STREAM_PORT, 1200);
+    size_t bytes = 0;
+    uint32_t frame = 0;
+    bool cors = false;
+    if (ok) {
+      client.print("GET /frame HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n");
+      ok = client.readStringUntil('\n').indexOf("200") >= 0;
+      while (ok) {
+        const String line = client.readStringUntil('\n');
+        if (line == "\r") break;
+        if (!line.length()) { ok = false; break; }
+        if (line.startsWith("Content-Length: ")) bytes = line.substring(16).toInt();
+        if (line.startsWith("X-Frame-Number: ")) frame = line.substring(16).toInt();
+        if (line.startsWith("Access-Control-Expose-Headers: X-Frame-Number")) cors = true;
+      }
+    }
+    ok = ok && bytes >= 4 && bytes <= MAX_JPEG_BYTES && frame && cors;
+    size_t received = 0;
+    uint8_t first[2] = {}, tail[2] = {};
+    while (ok && received < bytes && millis() - requestAt < 1500) {
+      const size_t want = bytes - received < sizeof(buffer) ? bytes - received : sizeof(buffer);
+      const int n = client.read(buffer, want);
+      if (n < 0) { ok = false; break; }
+      for (int i = 0; i < n; ++i) {
+        if (received < 2) first[received] = buffer[i];
+        tail[0] = tail[1]; tail[1] = buffer[i]; ++received;
+      }
+      if (!n) vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    ok = ok && received == bytes && first[0] == 0xff && first[1] == 0xd8 &&
+      tail[0] == 0xff && tail[1] == 0xd9;
+    if (ok) {
+      ++frames;
+      if (frame == lastFrame) ++duplicates;
+      lastFrame = frame;
+    } else { ++failures; client.stop(); }
+    if (millis() - lastProbe >= 5000) {
+      lastProbe = millis();
+      WiFiClient probe;
+      probe.setTimeout(1200);
+      if (probe.connect(IPAddress(127, 0, 0, 1), 80, 1200)) {
+        probe.print("GET /api/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        if (probe.readStringUntil('\n').indexOf("200") >= 0) ++probes;
+        else ++failures;
+      } else ++failures;
+      probe.stop();
+    }
+    const uint32_t elapsed = millis() - requestAt;
+    if (elapsed < PREVIEW_INTERVAL_MS) vTaskDelay(pdMS_TO_TICKS(PREVIEW_INTERVAL_MS - elapsed));
+  }
+  client.stop();
+  const Snapshot after = readSnapshot();
+  const bool preserved = before.background == after.background && before.orange == after.orange && before.gray == after.gray;
+  Serial.printf("PREVIEWTEST frames=%lu,fps=%.1f,duplicates=%lu,failures=%lu,api=%lu,recognition=%.1f,cameraErrors=%lu,calibration=%u,bg=%u,orange=%u,gray=%u\n",
+    static_cast<unsigned long>(frames), frames * 1000.0f / (millis() - started),
+    static_cast<unsigned long>(duplicates), static_cast<unsigned long>(failures),
+    static_cast<unsigned long>(probes), after.fps, static_cast<unsigned long>(after.errors - before.errors),
+    preserved, after.background, after.orange, after.gray);
+  xSemaphoreTake(sharedMutex, portMAX_DELAY);
+  testRunning = false;
+  xSemaphoreGive(sharedMutex);
+  vTaskDelete(nullptr);
+}
 void serialCommands() {
   while (Serial.available()) {
     const int command = Serial.read();
-    if (command != 't' && command != 'r') continue;
+    if (command != 't' && command != 'r' && command != 'p') continue;
     xSemaphoreTake(sharedMutex, portMAX_DELAY);
     const bool start = !testRunning;
     if (start) testRunning = true;
     xSemaphoreGive(sharedMutex);
-    if (start && xTaskCreatePinnedToCore(command == 'r' ? reconnectTestTask : streamTestTask, "stream-test", 6144,
+    if (start && xTaskCreatePinnedToCore(command == 'p' ? previewTestTask : command == 'r' ? reconnectTestTask : streamTestTask, "stream-test", 6144,
                                         nullptr, 1, nullptr, 1) != pdPASS) {
       xSemaphoreTake(sharedMutex, portMAX_DELAY);
       testRunning = false;
