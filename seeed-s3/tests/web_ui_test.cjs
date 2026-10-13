@@ -1,8 +1,8 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const script=fs.readFileSync(path.join(__dirname,'../firmware/XIAOS3Gatos/web_ui.h'),'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
 const timers=new Map(),elements=new Map(),events={},windowEvents={};
-let now=100000,nextTimer=0,draws=0,closed=0,checks=0,frame=80,apiFails=false,photoFails=false,noContent=false,badSize=false,bitmapFails=false,pending=false,decodeBlocked=false,releaseDecode=null,photoRequests=0,maxRequests=0,revoked=0;
-const status={label:'gris',busy:false,frame:20,ageMs:20,foreground:.6,useful:.7,fps:8,videoFrame:80,streamPort:81,previewIntervalMs:33,analysisMs:4,decodeMs:60,freePsram:6000000,background:true,orangeSamples:8,graySamples:8,message:'Guardado',options:{x:20,y:20,width:60,height:60}};
+let now=100000,nextTimer=0,draws=0,closed=0,checks=0,frame=80,apiFails=false,photoFails=false,noContent=false,badSize=false,bitmapFails=false,pending=false,decodeBlocked=false,releaseDecode=null,photoRequests=0,maxRequests=0,revoked=0,receiveDelay=0,decodeDelay=0;
+const status={label:'gris',busy:false,frame:20,ageMs:20,foreground:.6,useful:.7,fps:8,videoFrame:80,videoFps:27.8,streamPort:81,previewIntervalMs:33,analysisMs:4,decodeMs:60,freePsram:6000000,background:true,orangeSamples:8,graySamples:8,message:'Guardado',options:{x:20,y:20,width:60,height:60}};
 function element(id){if(!elements.has(id))elements.set(id,{style:{},elements:{namedItem:()=>null},getContext:()=>({drawImage(){draws++},clearRect(){throw Error('La vista no debe borrarse')}}),removeAttribute(){throw Error('La vista no debe vaciarse')}});return elements.get(id)}
 class Clock extends Date{static now(){return now}}
 class TestURL extends URL{static createObjectURL(){return 'blob:test'}static revokeObjectURL(){revoked++}}
@@ -10,8 +10,8 @@ class TestImage{constructor(){this.naturalWidth=320;this.naturalHeight=240}set s
 const document={hidden:false,getElementById:element,querySelectorAll:()=>[],addEventListener:(type,fn)=>events[type]=fn};
 const context=vm.createContext({document,window:{addEventListener:(type,fn)=>windowEvents[type]=fn},location:{href:'http://192.168.4.1/'},Date:Clock,URL:TestURL,URLSearchParams,AbortController,Image:TestImage,
 setTimeout:(fn,delay)=>{const id=++nextTimer;timers.set(id,{fn,delay});return id},clearTimeout:id=>timers.delete(id),
-createImageBitmap:async()=>{if(decodeBlocked)await new Promise(resolve=>releaseDecode=resolve);if(bitmapFails)throw Error('Compatibilidad');return {width:badSize?640:320,height:240,close(){closed++}}},
-fetch:async(url,options)=>{if(url==='/api/status'){if(apiFails)throw Error('Timeout de 10 segundos');return {ok:true,json:async()=>status}}photoRequests++;maxRequests=Math.max(maxRequests,photoRequests);try{if(pending)await new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(Error('Abortado')),{once:true}));if(photoFails)throw Error('Corte Wi-Fi');return noContent?{ok:true,status:204}:{ok:true,status:200,headers:{get:()=>String(frame)},blob:async()=>({size:1024})}}finally{photoRequests--}}
+createImageBitmap:async()=>{if(decodeBlocked)await new Promise(resolve=>releaseDecode=resolve);if(bitmapFails)throw Error('Compatibilidad');now+=decodeDelay;return {width:badSize?640:320,height:240,close(){closed++}}},
+fetch:async(url,options)=>{if(url==='/api/status'){if(apiFails)throw Error('Timeout de 10 segundos');return {ok:true,json:async()=>status}}photoRequests++;maxRequests=Math.max(maxRequests,photoRequests);try{if(pending)await new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(Error('Abortado')),{once:true}));if(photoFails)throw Error('Corte Wi-Fi');now+=receiveDelay;return noContent?{ok:true,status:204}:{ok:true,status:200,headers:{get:()=>String(frame)},blob:async()=>({size:1024})}}finally{photoRequests--}}
 });
 const check=condition=>{assert.ok(condition);checks++};
 async function tick(){vm.runInContext('clearTimeout(previewTimer);previewTimer=null',context);await vm.runInContext('previewTick()',context);await new Promise(resolve=>setImmediate(resolve))}
@@ -30,4 +30,5 @@ decodeBlocked=true;frame++;await tick();check(vm.runInContext('previewPainting',
 frame++;await tick();const queued=frame;check(vm.runInContext('pendingPreview.frame',context)===queued);
 frame++;await tick();check(vm.runInContext('pendingPreview.frame',context)===frame&&draws===7);check(maxRequests===1);
 decodeBlocked=false;releaseDecode();await new Promise(resolve=>setImmediate(resolve));check(vm.runInContext('previewFrame',context)===frame&&draws===9);
-check(vm.runInContext('pendingPreview===null&&!previewPainting',context));console.log('web_ui: '+checks+' comprobaciones de persistencia, errores y concurrencia correctas');})().catch(error=>{console.error(error);process.exitCode=1});
+check(vm.runInContext('pendingPreview===null&&!previewPainting',context));
+receiveDelay=75;decodeDelay=12;frame++;await tick();check(vm.runInContext('previewReceiveMs',context)===75);check(vm.runInContext('previewDecodeMs',context)===12);apiFails=false;await vm.runInContext('poll()',context);check(element('previewPerformance').textContent==='Cámara 27.8 FPS · Recepción 75 ms · Dibujo 12 ms · Foto 1.0 KB');console.log('web_ui: '+checks+' comprobaciones de persistencia, errores y concurrencia correctas');})().catch(error=>{console.error(error);process.exitCode=1});

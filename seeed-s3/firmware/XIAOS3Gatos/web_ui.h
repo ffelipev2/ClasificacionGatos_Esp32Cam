@@ -30,6 +30,7 @@ label{font-size:14px;color:#bbc8d6}input{display:block;width:100%;padding:8px;ma
 <div class="status muted" id="result" aria-live="polite">Conectando…</div>
 <div class="meta" id="metrics">Esperando imagen</div>
 <div class="meta" id="performance"></div>
+<div class="meta" id="previewPerformance">Esperando medición de la vista</div>
 <p class="note">La cámara debe estar fija y un solo gato debe ocupar la zona marcada. El sistema compara colores; un objeto parecido también puede coincidir.</p>
 </section><section class="card"><h2>Calibración</h2>
 <div class="step"><p><b>1. Fondo vacío.</b> Retira los gatos de la zona y mantén la luz habitual. Registrar un nuevo fondo borra las muestras anteriores.</p>
@@ -51,12 +52,12 @@ label{font-size:14px;color:#bbc8d6}input{display:block;width:100%;padding:8px;ma
 <label>Diferencia con el fondo (5–80)<input name="difference" type="number" min="5" max="80" required></label>
 <label>Área mínima ocupada (%)<input name="minForeground" type="number" min="5" max="80" required></label>
 </div><button type="submit">Guardar ajustes</button></form></details>
-<footer>Vista 3.4 · Sin servicios externos ni conexión a internet. Calibración guardada en la memoria de la ESP32.</footer>
+<footer>Versión 3.5 · Sin servicios externos ni conexión a internet. Calibración guardada en la memoria de la ESP32.</footer>
 </main><script>
 const $=id=>document.getElementById(id);
 const labels={sin_calibrar:'Falta calibración',sin_objeto:'Zona vacía',naranja:'Pelaje naranja',gris:'Pelaje gris',indeterminado:'Indeterminado',poca_luz:'Muy poca luz',error_camara:'Error de cámara'};
 let initialized=false,offline=false,lastOptions='',previewUrl='',previewTimer=null,previewController=null,previewRunning=false,previewEnabled=false,previewEpoch=0,previewInterval=33,previewFrame=0,previewReceivedFrame=0,previewGoodAt=0,previewFps=0,previewRateAt=0,previewRateFrames=0,pageActive=true;
-let pendingPreview=null,previewPainting=false,paintController=null,previewDecodeMs=0;
+let pendingPreview=null,previewPainting=false,paintController=null,previewDecodeMs=0,previewReceiveMs=0,previewBytes=0;
 const previewCanvas=$('preview'),previewContext=previewCanvas.getContext('2d');
 async function json(url,options={}){
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),10000);
@@ -133,6 +134,7 @@ async function previewTick(){
     if(!blob.size||blob.size>98304)throw Error('Imagen incompleta');
     if(frame&&frame===previewReceivedFrame){if(Date.now()-previewGoodAt>3000)previewMessage('Esperando una imagen nueva…');return}
     if(controller.signal.aborted||epoch!==previewEpoch||!pageActive||document.hidden)return;
+    const elapsed=Date.now()-started;previewReceiveMs=previewReceiveMs?previewReceiveMs*.8+elapsed*.2:elapsed;previewBytes=blob.size;
     previewReceivedFrame=frame;pendingPreview={blob,frame,epoch};paintPreview();
   }catch(error){
     if(epoch===previewEpoch&&pageActive&&!document.hidden)previewMessage(previewGoodAt?'Reconectando vídeo · última imagen conservada':'Conectando con la cámara…');
@@ -152,6 +154,7 @@ async function poll(){
     $('result').className='status '+(s.label==='naranja'?'orange':s.label==='gris'?'gray':'muted');
     $('metrics').textContent='Zona ocupada: '+Math.round(s.foreground*100)+'% · Píxeles útiles: '+Math.round((s.useful||0)*100)+'% · Imagen '+s.frame+(s.frame?' · Hace '+(s.ageMs/1000).toFixed(1)+' s':'')+' · Reconocimiento '+s.fps.toFixed(1)+'/s · Vista '+(previewGoodAt&&Date.now()-previewGoodAt<3000?previewFps:0).toFixed(1)+' FPS';
     $('performance').textContent='Análisis '+s.analysisMs.toFixed(1)+' ms · Decodificación '+s.decodeMs.toFixed(1)+' ms · PSRAM libre '+(s.freePsram/1048576).toFixed(1)+' MB';
+    $('previewPerformance').textContent=previewGoodAt&&Date.now()-previewGoodAt<3000?'Cámara '+(Number(s.videoFps)||0).toFixed(1)+' FPS · Recepción '+Math.round(previewReceiveMs)+' ms · Dibujo '+Math.round(previewDecodeMs)+' ms · Foto '+(previewBytes/1024).toFixed(1)+' KB':'Esperando medición de la vista';
     $('bgCount').textContent=s.background?'Registrado':'Pendiente';
     $('orangeCount').textContent=s.orangeSamples+' imágenes';$('grayCount').textContent=s.graySamples+' imágenes';
     $('notice').textContent=s.busy?'Capturas válidas: '+s.progress+'/'+s.total+' · '+s.message:s.message;

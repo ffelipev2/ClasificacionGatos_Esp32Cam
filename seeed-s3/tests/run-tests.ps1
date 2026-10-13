@@ -8,24 +8,31 @@ try {
   $classifier = Join-Path $projectRoot "firmware\XIAOS3Gatos\classifier.cpp"
   $poolTest = Join-Path $PSScriptRoot "preview_pool_test.cpp"
   $jpegTest = Join-Path $PSScriptRoot "jpeg_frame_test.cpp"
+  $headerTest = Join-Path $PSScriptRoot "http_header_batch_test.cpp"
   if (Get-Command g++ -ErrorAction SilentlyContinue) {
     & g++ -std=c++14 -O2 -Wall -Wextra $classifierTest $classifier -o classifier_test.exe
     if ($LASTEXITCODE -ne 0) { throw "Falló la compilación del clasificador." }
     & g++ -std=c++14 -O2 -Wall -Wextra $poolTest -o preview_pool_test.exe
     if ($LASTEXITCODE -ne 0) { throw "Falló la compilación del pool." }
     & g++ -std=c++14 -O2 -Wall -Wextra $jpegTest -o jpeg_frame_test.exe
+    if ($LASTEXITCODE -ne 0) { throw "Falló la compilación de JPEG." }
+    & g++ -std=c++14 -O2 -Wall -Wextra $headerTest -o http_header_batch_test.exe
   } elseif (Get-Command cl.exe -ErrorAction SilentlyContinue) {
     & cl.exe /nologo /std:c++14 /EHsc /W4 $classifierTest $classifier /Fe:classifier_test.exe
     if ($LASTEXITCODE -ne 0) { throw "Falló la compilación del clasificador." }
     & cl.exe /nologo /std:c++14 /EHsc /W4 $poolTest /Fe:preview_pool_test.exe
     if ($LASTEXITCODE -ne 0) { throw "Falló la compilación del pool." }
     & cl.exe /nologo /std:c++14 /EHsc /W4 $jpegTest /Fe:jpeg_frame_test.exe
+    if ($LASTEXITCODE -ne 0) { throw "Falló la compilación de JPEG." }
+    & cl.exe /nologo /std:c++14 /EHsc /W4 $headerTest /Fe:http_header_batch_test.exe
   } else { throw "Abre Developer PowerShell for Visual Studio o instala g++." }
-  if ($LASTEXITCODE -ne 0) { throw "Falló la compilación de JPEG." }
+  if ($LASTEXITCODE -ne 0) { throw "Falló la compilación de cabecera HTTP." }
   & .\classifier_test.exe
   if ($LASTEXITCODE -ne 0) { throw "Fallaron las pruebas del clasificador." }
   & .\preview_pool_test.exe
   if ($LASTEXITCODE -ne 0) { throw "Fallaron las pruebas del pool." }
   & .\jpeg_frame_test.exe
   if ($LASTEXITCODE -ne 0) { throw "Fallaron las pruebas de JPEG." }
+  & .\http_header_batch_test.exe
+  if ($LASTEXITCODE -ne 0) { throw "Fallaron las pruebas de cabecera HTTP." }
 } finally { Pop-Location }

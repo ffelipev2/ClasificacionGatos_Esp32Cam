@@ -1,0 +1,17 @@
+{
+  "viewport": "430x932",
+  "fitsViewport": true,
+  "previewMetrics": "Cámara 27.8 FPS · Recepción 29 ms · Dibujo 57 ms · Foto 2.1 KB",
+  "statusTimeoutMs": 11200,
+  "photoUnavailable": true,
+  "corruptJpeg": true,
+  "partialJpegTimeout": true,
+  "recovered": true,
+  "blackCanvasSamples": 0,
+  "canvasClears": 0,
+  "maxPhotoActive": 1,
+  "pipelineNetworkMs": 20,
+  "pipelineDecodeMs": 50,
+  "pipelineFps": 17.9,
+  "pageErrors": []
+}

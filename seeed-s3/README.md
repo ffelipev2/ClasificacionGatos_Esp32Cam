@@ -16,15 +16,19 @@ Versión independiente del proyecto ESP32-CAM, optimizada para **Seeed Studio XI
 
 **Versión 3.1-video:** reemplaza las fotos solicitadas cada 200 ms —un máximo teórico de 5 imágenes/s— por una conexión MJPEG continua en el puerto 81. La captura funciona al ritmo del sensor y el analizador toma las últimas imágenes cada 125 ms. El puerto 80 sigue atendiendo el panel, la calibración y los ajustes durante el vídeo. Recarga la página después de actualizar para recibir la interfaz nueva.
 
-**Versión actual 3.4-vista-fluida:** aumenta el objetivo de la vista de 15 a 30 imágenes/s y solapa la recepción de un JPEG con la decodificación del anterior. Mantiene una sola transferencia HTTP y una sola foto pendiente, reemplazándola por la más reciente si la tablet tarda en dibujar. El ritmo se adapta al tiempo de decodificación. `/frame?after=N` espera hasta 100 ms una imagen posterior a N y devuelve HTTP 204 si todavía no hay otra. Así evita descargar duplicados y acumular imágenes atrasadas.
+**Versión actual 3.5-envio-fluido:** agrupa la cabecera HTTP de las fotos antes de escribir en el socket y activa TCP_NODELAY para evitar esperas de los segmentos cortos. Mantiene la resolución, la calidad y la calibración. Añade al panel los tiempos de recepción y dibujo y la captura de la cámara para medir el límite en el teléfono. Esta optimización aborda un posible coste del envío; el resultado en Wi-Fi debe comprobarse en el dispositivo.
+
+**Versión 3.4-vista-fluida:** aumenta el objetivo de la vista de 15 a 30 imágenes/s y solapa la recepción de un JPEG con la decodificación del anterior. Mantiene una sola transferencia HTTP y una sola foto pendiente, reemplazándola por la más reciente si la tablet tarda en dibujar. El ritmo se adapta al tiempo de decodificación. `/frame?after=N` espera hasta 100 ms una imagen posterior a N y devuelve HTTP 204 si todavía no hay otra. Así evita descargar duplicados y acumular imágenes atrasadas.
 
 La vista conserva la última imagen válida ante errores de red, de estado o de JPEG y pausa/recupera las peticiones al ocultar/regresar a la página. La PSRAM mantiene seis buffers JPEG protegidos para captura, análisis y envío. El análisis sigue ejecutándose en la placa a un objetivo de ocho imágenes/s; los modelos y la calibración se conservan.
 
-**Medición interna de un minuto:** 1 549 imágenes únicas, **25,8 FPS**, cero duplicados y cero fallos; reconocimiento **8,0 análisis/s**. La versión 3.3 daba 14,9 solicitudes/s en la misma prueba. El incremento medido es aproximadamente **73 %**; el objetivo de 30/s no implica que el sensor o la tablet alcancen esa cifra.
+**Medición interna de 3.4, un minuto:** 1 549 imágenes únicas, **25,8 FPS**, cero duplicados y cero fallos; reconocimiento **8,0 análisis/s**. La versión 3.3 daba 14,9 solicitudes/s en la misma prueba. El incremento medido es aproximadamente **73 %**; el objetivo de 30/s no implica que el sensor o la tablet alcancen esa cifra.
+
+En **3.5**, la prueba interna recibió **1 605 imágenes únicas, 26,7 FPS**, sin fallos y con calibración conservada. Este dato usa TCP local. En el teléfono del montaje, el usuario reportó **15–21 FPS** tras actualizar a 3.5, frente a **7–14 FPS** con 3.4. Los indicadores «Recepción» y «Dibujo» permiten seguir comprobando el rendimiento.
 
 La cámara reserva unos **96 KB por framebuffer en PSRAM**, en lugar de los 15 KB que asigna el driver al iniciar directamente en QVGA. Se inicializa en SVGA para reservar ese espacio y luego se configura el sensor en **320 × 240**, siguiendo el patrón del ejemplo oficial. Cada captura se valida antes de enviarla y decodificarla: si contiene varios JPEG concatenados, se usa únicamente la última imagen completa con las dimensiones correctas. El clasificador mantiene su buffer pequeño y la misma zona de muestreo.
 
-La [verificación de 3.4](docs/vista-fluida.md) comprueba la cola acotada, el solapamiento de recepción y decodificación, las imágenes nuevas y la conservación de la vista ante cortes. Se conservan los registros de [3.3](docs/vista-estable.md) y [3.2](docs/recuperacion-video.md). Las pruebas internas usan TCP local: **no miden el rendimiento Wi-Fi de la tablet**. La velocidad «Vista» del panel cuenta imágenes dibujadas, mientras «Reconocimiento» mide el análisis en la placa.
+La [verificación de 3.5](docs/envio-fluido.md) comprueba el envío agrupado, los JPEG completos y la conservación de la calibración. La [verificación de 3.4](docs/vista-fluida.md) comprueba la cola acotada, el solapamiento de recepción y decodificación, las imágenes nuevas y la conservación de la vista ante cortes. Se conservan los registros de [3.3](docs/vista-estable.md) y [3.2](docs/recuperacion-video.md). Las pruebas internas usan TCP local: **no miden el rendimiento Wi-Fi de la tablet**. La velocidad «Vista» del panel cuenta imágenes dibujadas, mientras «Reconocimiento» mide el análisis en la placa.
 
 Los buffers grandes aprovechan la PSRAM. La imagen pequeña de análisis usa RAM interna cuando hay espacio, con PSRAM como alternativa. La cuadrícula de color sigue teniendo 40 × 30 puntos. La flash de 8 MB usa la partición oficial `default_8MB`: dos espacios de aplicación de unos 3,2 MB y un espacio de archivos reservado. Este firmware no implementa actualización por Wi-Fi ni usa todavía ese espacio de archivos.
 
@@ -79,9 +83,23 @@ Es necesario calibrar esta placa desde cero: no importa automáticamente los dat
 
 El sistema compara **color de pelaje en una escena fija**; no incorpora un detector neuronal de gatos. Una mano o tela de color parecido puede coincidir. Los perfiles demasiado similares producen «Indeterminado» y se pueden volver a aprender. Las pruebas sintéticas no miden precisión con gatos reales.
 
-La actualización de 3.0–3.3 a 3.4 conserva el formato de calibración, el algoritmo y los ajustes. Usa `-SoloAplicacion` para mantener los registros guardados. Recarga la página y comprueba que el pie diga **Vista 3.4**.
+La actualización de 3.0–3.4 a 3.5 conserva el formato de calibración, el algoritmo y los ajustes. Usa `-SoloAplicacion` para mantener los registros guardados. Recarga la página y comprueba que el pie diga **Versión 3.5**.
 
 Para conectarla a tu red de 2,4 GHz, copia `config.local.example.h` como `config.local.h` y completa `WIFI_SSID` y `WIFI_PASSWORD`. La IP se imprime por USB a 115200 baudios. Si no conecta en 15 segundos, crea su propia red.
+
+## Lectura de la fluidez
+
+Después de recargar el panel, el pie debe indicar **Versión 3.5**. Consulta:
+
+| Indicador | Qué mide |
+|---|---|
+| Vista, FPS | Imágenes efectivamente dibujadas en el teléfono |
+| Cámara, FPS | Capturas de la placa, independientemente del navegador |
+| Recepción, ms | Petición y recepción de un JPEG completo; incluye la espera por una captura nueva |
+| Dibujo, ms | Decodificación del JPEG y dibujo en el teléfono |
+| Foto, KB | Tamaño de la última foto recibida |
+
+Recepción y dibujo son promedios suavizados y se solapan. Si Cámara se mantiene cerca de 28 pero Vista baja, estos tiempos ayudan a distinguir el coste de la transferencia del coste del navegador. Las métricas de Análisis y Decodificación corresponden al reconocimiento dentro de la placa. Se recomienda tener un solo visor abierto.
 
 ## Compilación y pruebas
 

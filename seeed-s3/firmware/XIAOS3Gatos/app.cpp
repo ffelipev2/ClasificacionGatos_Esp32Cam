@@ -23,6 +23,7 @@
 #include "web_ui.h"
 #include "preview_pool.h"
 #include "jpeg_frame.h"
+#include "http_header_batch.h"
 
 #if !defined(CONFIG_IDF_TARGET_ESP32S3)
 #error "Este firmware requiere la XIAO ESP32S3 Sense."
@@ -684,6 +685,7 @@ struct PhotoTransfer {
   int socket = -1;
   uint32_t started = 0;
   bool active = false;
+  cats::HttpHeaderBatch headers;
 } photoTransfer;
 
 int normalSocketSend(httpd_handle_t, int socket, const char *buf, size_t bytes, int flags) {
@@ -691,23 +693,35 @@ int normalSocketSend(httpd_handle_t, int socket, const char *buf, size_t bytes, 
   return sent > 0 ? sent : HTTPD_SOCK_ERR_FAIL;
 }
 
-int boundedPhotoSend(httpd_handle_t, int socket, const char *buf, size_t bytes, int flags) {
-  for (;;) {
+bool boundedPhotoWireSend(int socket, const char *buf, size_t bytes, int flags) {
+  while (bytes) {
     xSemaphoreTake(sharedMutex, portMAX_DELAY);
     const bool current = photoTransfer.active && photoTransfer.socket == socket;
     const bool expired = millis() - photoTransfer.started >= PREVIEW_SEND_TIMEOUT_MS;
     xSemaphoreGive(sharedMutex);
-    if (!current) return HTTPD_SOCK_ERR_FAIL;
-    if (expired) return HTTPD_SOCK_ERR_TIMEOUT;
+    if (!current || expired) return false;
     const int sent = send(socket, buf, bytes, flags | MSG_DONTWAIT);
-    if (sent > 0) return sent;
+    if (sent > 0) { buf += sent; bytes -= sent; continue; }
     if (!sent || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
-      return HTTPD_SOCK_ERR_FAIL;
+      return false;
     vTaskDelay(pdMS_TO_TICKS(2));
   }
+  return true;
+}
+
+int boundedPhotoSend(httpd_handle_t, int socket, const char *buf, size_t bytes, int flags) {
+  const bool ok = photoTransfer.headers.write(buf, bytes, [socket, flags](const char *data, size_t count) {
+    return boundedPhotoWireSend(socket, data, count, flags);
+  });
+  return ok ? static_cast<int>(bytes) : HTTPD_SOCK_ERR_FAIL;
 }
 
 esp_err_t frameHandler(httpd_req_t *req) {
+  const int socket = httpd_req_to_sockfd(req), noDelay = 1;
+  // Enlaces reales pueden retrasar el último segmento corto al esperar ACK.
+  // La cabecera de las fotos se agrupa antes de escribir en este socket.
+  if (setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay)) < 0)
+    return ESP_FAIL;
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
   httpd_resp_set_hdr(req, "Access-Control-Expose-Headers", "X-Frame-Number");
@@ -750,7 +764,6 @@ esp_err_t frameHandler(httpd_req_t *req) {
     // Esperar una captura nueva sin retener un JPEG ni bloquear otros núcleos.
     vTaskDelay(pdMS_TO_TICKS(2));
   }
-  const int socket = httpd_req_to_sockfd(req);
   if (httpd_sess_set_send_override(req->handle, socket, boundedPhotoSend) != ESP_OK) {
     xSemaphoreTake(sharedMutex, portMAX_DELAY);
     previewPool.release(slot);
@@ -761,6 +774,7 @@ esp_err_t frameHandler(httpd_req_t *req) {
   photoTransfer.socket = socket;
   photoTransfer.started = millis();
   photoTransfer.active = true;
+  photoTransfer.headers.reset();
   xSemaphoreGive(sharedMutex);
   char number[16];
   snprintf(number, sizeof(number), "%lu", static_cast<unsigned long>(frame));
