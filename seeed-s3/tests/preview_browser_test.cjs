@@ -11,7 +11,7 @@ const output = path.join(root, '.build/seeed-s3/tests');
 const html = fs.readFileSync(path.join(__dirname, '../firmware/XIAOS3Gatos/web_ui.h'), 'utf8')
   .match(/R"HTML\(([\s\S]*?)\)HTML"/)[1];
 const pending = new Set();
-let apiFault = false, photoFault = '', photoActive = 0, maxPhotoActive = 0, frame = 0;
+let apiFault = false, photoFault = '', photoActive = 0, maxPhotoActive = 0, frame = 0, photoResponseDelay = 0;
 const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const close = server => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
 
@@ -44,11 +44,12 @@ const close = server => new Promise(resolve => { server.close(resolve); server.c
       if (photoFault === 'corrupt') { res.writeHead(200, headers); res.end('JPEG incompleto'); return; }
       res.writeHead(200, {...headers, 'Content-Length': jpeg.length});
       if (photoFault === 'partial') { res.write(jpeg.subarray(0, 100)); pending.add(res); return; }
-      res.end(jpeg);
+      if (photoResponseDelay) setTimeout(() => res.end(jpeg), photoResponseDelay);
+      else res.end(jpeg);
     });
     await listen(photoServer);
     const status = {label: 'gris', busy: false, frame: 20, ageMs: 20, foreground: .6, useful: .7,
-      fps: 8, videoFrame: 1, streamPort: photoServer.address().port, previewIntervalMs: 67,
+      fps: 8, videoFrame: 1, streamPort: photoServer.address().port, previewIntervalMs: 33,
       analysisMs: 4, decodeMs: 60, freePsram: 6000000, background: true, orangeSamples: 8,
       graySamples: 8, message: 'Guardado', options: {x: 20, y: 20, width: 60, height: 60, difference: 20, minForeground: 10}};
     pageServer = http.createServer((req, res) => {
@@ -62,6 +63,13 @@ const close = server => new Promise(resolve => { server.close(resolve); server.c
     const context = await browser.newContext({viewport: {width: 768, height: 1024}, isMobile: true, hasTouch: true});
     await context.addInitScript(() => {
       window.previewDraws = 0; window.previewClears = 0;
+      window.previewDecodeDelay = 0;
+      const bitmap = window.createImageBitmap.bind(window);
+      window.createImageBitmap = async (...args) => {
+        const image = await bitmap(...args);
+        if (window.previewDecodeDelay) await new Promise(resolve => setTimeout(resolve, window.previewDecodeDelay));
+        return image;
+      };
       const draw = CanvasRenderingContext2D.prototype.drawImage;
       const clear = CanvasRenderingContext2D.prototype.clearRect;
       CanvasRenderingContext2D.prototype.drawImage = function (...args) {
@@ -81,6 +89,17 @@ const close = server => new Promise(resolve => { server.close(resolve); server.c
     await page.goto(`http://127.0.0.1:${pageServer.address().port}/`);
     await page.waitForFunction(() => window.previewDraws >= 5);
     const normal = await sample(); opaque(normal);
+    photoResponseDelay = 20;
+    await page.evaluate(() => { window.previewDecodeDelay = 50; });
+    await page.waitForTimeout(1000);
+    const pipelineStart = await sample();
+    const pipelineAt = Date.now();
+    await page.waitForTimeout(2000);
+    const pipelineEnd = await sample(); opaque(pipelineEnd);
+    const pipelineFps = (pipelineEnd.draws - pipelineStart.draws) * 1000 / (Date.now() - pipelineAt);
+    assert.ok(pipelineFps > 17, `La recepción y decodificación deben solaparse: ${pipelineFps.toFixed(1)} FPS`);
+    photoResponseDelay = 0;
+    await page.evaluate(() => { window.previewDecodeDelay = 0; });
     apiFault = true;
     await page.waitForTimeout(11200);
     const statusTimeout = await sample(); opaque(statusTimeout);
@@ -108,11 +127,12 @@ const close = server => new Promise(resolve => { server.close(resolve); server.c
     await page.waitForFunction(count => window.previewDraws > count, hidden.draws);
     opaque(await sample()); assert.deepEqual(pageErrors, []);
     assert.equal(maxPhotoActive, 1, 'Solo debe haber una foto en recepción');
-    await page.screenshot({path: path.join(output, 'vista-estable.png'), fullPage: true});
+    await page.screenshot({path: path.join(output, 'vista-fluida.png'), fullPage: true});
     const result = {viewport: '768x1024', statusTimeoutMs: 11200, photoUnavailable: true,
       corruptJpeg: true, partialJpegTimeout: true, recovered: true, blackCanvasSamples: 0,
-      canvasClears: recovered.clears, maxPhotoActive, pageErrors};
-    fs.writeFileSync(path.join(output, 'vista-estable-browser.json'), JSON.stringify(result, null, 2) + '\n');
+      canvasClears: recovered.clears, maxPhotoActive, pipelineNetworkMs: 20, pipelineDecodeMs: 50,
+      pipelineFps: Number(pipelineFps.toFixed(1)), pageErrors};
+    fs.writeFileSync(path.join(output, 'vista-fluida-browser.json'), JSON.stringify(result, null, 2) + '\n');
     console.log(JSON.stringify(result));
     await context.close();
   } finally {

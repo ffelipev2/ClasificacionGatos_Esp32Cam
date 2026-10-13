@@ -7,7 +7,7 @@ Hay dos proyectos independientes. Elige el correspondiente a tu placa:
 | Placa | Versión | Proyecto | Instrucciones |
 |---|---|---|---|
 | ESP32-CAM AI Thinker, OV2640 y PSRAM | `2.0-calibracion` | [firmware/ESP32CAMGatos](firmware/ESP32CAMGatos) | [Manual ESP32-CAM](docs/esp32cam.md) |
-| Seeed XIAO ESP32S3 Sense, 8 MB de flash y PSRAM OPI | `3.3-vista-estable` | [seeed-s3](seeed-s3) | [Manual XIAO Sense](seeed-s3/README.md) |
+| Seeed XIAO ESP32S3 Sense, 8 MB de flash y PSRAM OPI | `3.4-vista-fluida` | [seeed-s3](seeed-s3) | [Manual XIAO Sense](seeed-s3/README.md) |
 
 El sistema aprende colores dentro de una zona fija de la imagen. Supone que un solo gato ocupa esa zona; una mano, tela u objeto de color parecido también puede coincidir. No incorpora un detector neuronal de gatos ni identifica individuos de igual color.
 
@@ -29,25 +29,27 @@ Desde la raíz de este repositorio, con las herramientas ESP32 de Arduino instal
 .\seeed-s3\cargar.ps1 -Port COM30 -SoloAplicacion
 ```
 
-Sustituye `COM30` por el puerto de tu placa. Para una instalación nueva, usa el mismo comando sin `-SoloAplicacion`. El script verifica chip, flash y hashes de los binarios, respalda NVS y carga el firmware. La actualización de **3.0, 3.1 o 3.2 a 3.3 conserva los registros de calibración**.
+Sustituye `COM30` por el puerto de tu placa. Para una instalación nueva, usa el mismo comando sin `-SoloAplicacion`. El script verifica chip, flash y hashes de los binarios, respalda NVS y carga el firmware. La actualización de **3.0–3.3 a 3.4 conserva los registros de calibración**.
 
 ## Vista estable en la versión S3
 
-La versión `3.3-vista-estable` corrige la vista que se iba a negro al reintentar una conexión o al fallar una consulta de estado:
+La versión `3.4-vista-fluida` aumenta la velocidad de la vista y conserva la recuperación que evitó la pantalla negra:
 
 - Captura JPEG continuamente, mientras otra tarea analiza la última imagen disponible cada 125 ms.
 - Reserva unos 96 KB en PSRAM por framebuffer de cámara, en lugar de 15 KB, manteniendo la imagen en 320 × 240. Si una captura contiene varias imágenes JPEG, envía y analiza solo la última completa, con dimensiones verificadas.
 - Usa seis buffers de vista en PSRAM para evitar sobrescribir imágenes que se están leyendo o enviando, también durante una reconexión.
-- El panel solicita una imagen JPEG completa de una en una al **puerto 81**, hasta unas **15 imágenes/s**. El ritmo se adapta al tiempo de recepción y decodificación de la tablet.
+- El panel recibe JPEG completos al **puerto 81**, con un objetivo máximo de **30 imágenes/s**, limitado por el sensor, Wi-Fi y la tablet. Hay una sola transferencia HTTP activa.
+- Recibe la siguiente foto mientras decodifica y dibuja la anterior. Guarda únicamente la foto pendiente más reciente y adapta el ritmo al tiempo de decodificación.
+- Pide un número de imagen posterior al último recibido; el servidor espera brevemente una captura nueva y evita enviar duplicados.
 - Dibuja cada imagen válida en un canvas y conserva la anterior mientras recibe la siguiente. Las imágenes incompletas, los cortes de red y los errores de estado no vacían la vista.
 - Mantiene el panel y la calibración en el **puerto 80**. Una consulta de estado que tarda 10 segundos no detiene las imágenes.
 - Pausa al ocultar la página y vuelve a pedir imágenes al regresar. Ya no renueva periódicamente la conexión de vista del panel.
 
-La prueba en un navegador real con tamaño de tablet conservó la imagen durante consultas de estado bloqueadas por 11 segundos, respuestas HTTP 503, JPEG corruptos y transferencias incompletas. Los resultados y la prueba interna de la placa se documentan en la [verificación de 3.3](seeed-s3/docs/vista-estable.md). La fluidez visible en la tablet depende también de su Wi-Fi y navegador.
+En la prueba interna de un minuto se recibieron **1 549 imágenes únicas, 25,8 FPS**, frente a **14,9 FPS** de la versión 3.3: aproximadamente **73 % más**. El reconocimiento mantuvo **8 análisis/s**, con cero fallos de imagen y calibración conservada. El navegador siguió conservando la imagen ante consultas de estado bloqueadas, JPEG corruptos y transferencias parciales. Ver la [verificación de 3.4](seeed-s3/docs/vista-fluida.md). La prueba interna usa TCP local; el resultado visible en la tablet depende de su Wi-Fi y navegador.
 
 La [verificación de 3.2](seeed-s3/docs/recuperacion-video.md) conserva el registro de la recuperación del servidor MJPEG.
 
-Para el uso habitual abre **http://192.168.4.1** y comprueba que el pie diga **Vista 3.3**. La foto directa está en **http://192.168.4.1:81/frame**. Se conserva el flujo MJPEG en `/stream` para diagnóstico; esa sesión termina después de 35 segundos y requiere volver a abrirla. Se recomienda un visor a la vez.
+Para el uso habitual abre **http://192.168.4.1** y comprueba que el pie diga **Vista 3.4**. La foto directa está en **http://192.168.4.1:81/frame**. Se conserva el flujo MJPEG en `/stream` para diagnóstico; esa sesión termina después de 35 segundos y requiere volver a abrirla. Se recomienda un visor a la vez.
 
 ## ESP32-CAM AI Thinker
 
@@ -63,7 +65,7 @@ Las conexiones GPIO0–GND para programar, alimentación, calibración y actuali
 |---|---|---|
 | Proyecto completo | [ESP32CAM-Gatos.zip](ESP32CAM-Gatos.zip) | [XIAO-ESP32S3-Sense-Gatos.zip](XIAO-ESP32S3-Sense-Gatos.zip) |
 | Binarios e instrucciones de carga | [dist](dist/README.md) | [seeed-s3/dist](seeed-s3/dist/README.md) |
-| Configuración PlatformIO | [platformio.ini](platformio.ini) | [Referencia histórica; no compatible con 3.3](seeed-s3/platformio.ini) |
+| Configuración PlatformIO | [platformio.ini](platformio.ini) | [Referencia histórica; usa Arduino IDE/CLI](seeed-s3/platformio.ini) |
 
 La compilación verificada usa **Arduino-ESP32 3.3.2**. Para la XIAO utiliza Arduino IDE o CLI; su configuración PlatformIO antigua necesita migrarse al core actual, como se explica en el [manual](seeed-s3/README.md#compilación-y-pruebas). Para usar una red Wi-Fi propia, copia el `config.local.example.h` del firmware elegido como `config.local.h`; las credenciales locales están excluidas de Git.
 

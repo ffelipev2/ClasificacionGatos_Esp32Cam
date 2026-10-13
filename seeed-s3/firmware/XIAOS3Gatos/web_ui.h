@@ -51,11 +51,12 @@ label{font-size:14px;color:#bbc8d6}input{display:block;width:100%;padding:8px;ma
 <label>Diferencia con el fondo (5–80)<input name="difference" type="number" min="5" max="80" required></label>
 <label>Área mínima ocupada (%)<input name="minForeground" type="number" min="5" max="80" required></label>
 </div><button type="submit">Guardar ajustes</button></form></details>
-<footer>Vista 3.3 · Sin servicios externos ni conexión a internet. Calibración guardada en la memoria de la ESP32.</footer>
+<footer>Vista 3.4 · Sin servicios externos ni conexión a internet. Calibración guardada en la memoria de la ESP32.</footer>
 </main><script>
 const $=id=>document.getElementById(id);
 const labels={sin_calibrar:'Falta calibración',sin_objeto:'Zona vacía',naranja:'Pelaje naranja',gris:'Pelaje gris',indeterminado:'Indeterminado',poca_luz:'Muy poca luz',error_camara:'Error de cámara'};
-let initialized=false,offline=false,lastOptions='',previewUrl='',previewTimer=null,previewController=null,previewRunning=false,previewEnabled=false,previewEpoch=0,previewInterval=67,previewFrame=0,previewGoodAt=0,previewFps=0,previewRateAt=0,previewRateFrames=0,pageActive=true;
+let initialized=false,offline=false,lastOptions='',previewUrl='',previewTimer=null,previewController=null,previewRunning=false,previewEnabled=false,previewEpoch=0,previewInterval=33,previewFrame=0,previewReceivedFrame=0,previewGoodAt=0,previewFps=0,previewRateAt=0,previewRateFrames=0,pageActive=true;
+let pendingPreview=null,previewPainting=false,paintController=null,previewDecodeMs=0;
 const previewCanvas=$('preview'),previewContext=previewCanvas.getContext('2d');
 async function json(url,options={}){
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),10000);
@@ -73,6 +74,7 @@ function startPreview(){schedulePreview()}
 function stopPreview(){
   ++previewEpoch;clearTimeout(previewTimer);previewTimer=null;
   if(previewController)previewController.abort();
+  if(paintController)paintController.abort();pendingPreview=null;
   previewMessage(previewGoodAt?'Vídeo en pausa':'Esperando imagen…');
 }
 async function decodePreview(blob,signal){
@@ -88,33 +90,54 @@ async function decodePreview(blob,signal){
     if(signal.aborted){cancel();return}signal.addEventListener('abort',cancel,{once:true});image.src=url;
   });
 }
+async function paintPreview(){
+  if(previewPainting||!pendingPreview||!pageActive||document.hidden)return;
+  previewPainting=true;
+  try{
+    while(pendingPreview&&pageActive&&!document.hidden){
+      const item=pendingPreview;pendingPreview=null;
+      const controller=new AbortController();paintController=controller;
+      const timeout=setTimeout(()=>controller.abort(),5000),started=Date.now();let image=null;
+      try{
+        image=await decodePreview(item.blob,controller.signal);
+        if(controller.signal.aborted||item.epoch!==previewEpoch||!pageActive||document.hidden)continue;
+        if((image.naturalWidth||image.width)!==320||(image.naturalHeight||image.height)!==240)throw Error('Dimensiones de imagen inválidas');
+        // La recepción de la siguiente foto puede avanzar mientras se
+        // decodifica esta. Solo se conserva una foto pendiente, la más nueva.
+        previewContext.drawImage(image,0,0,320,240);
+        const now=Date.now();
+        if(!previewRateAt||now-previewGoodAt>1500){previewRateAt=now;previewRateFrames=0;previewFps=0}
+        previewFrame=item.frame;previewGoodAt=now;previewMessage('');
+        ++previewRateFrames;
+        if(now-previewRateAt>=1000){previewFps=previewRateFrames*1000/(now-previewRateAt);previewRateAt=now;previewRateFrames=0}
+        const elapsed=now-started;previewDecodeMs=previewDecodeMs?previewDecodeMs*.8+elapsed*.2:elapsed;
+      }catch(error){
+        if(item.epoch===previewEpoch&&pageActive&&!document.hidden)previewMessage(previewGoodAt?'Reconectando vídeo · última imagen conservada':'Conectando con la cámara…');
+      }finally{
+        if(image&&typeof image.close==='function')image.close();clearTimeout(timeout);paintController=null;
+      }
+    }
+  }finally{previewPainting=false}
+}
 async function previewTick(){
   if(previewRunning||!previewEnabled||!pageActive||document.hidden)return;
   previewRunning=true;
   const epoch=previewEpoch,started=Date.now(),controller=new AbortController();previewController=controller;
-  const timeout=setTimeout(()=>controller.abort(),5000);let image=null,delay=previewInterval;
+  const timeout=setTimeout(()=>controller.abort(),5000);let delay=Math.max(previewInterval,Math.ceil(previewDecodeMs*.9));
   try{
-    const response=await fetch(previewUrl+'?t='+started,{cache:'no-store',signal:controller.signal});
+    const response=await fetch(previewUrl+'?t='+started+'&after='+previewReceivedFrame,{cache:'no-store',signal:controller.signal});
+    if(response.status===204){if(previewGoodAt&&Date.now()-previewGoodAt>3000)previewMessage('Esperando una imagen nueva…');return}
     if(!response.ok)throw Error('Esperando la cámara');
     const frame=Number(response.headers.get('X-Frame-Number'));
     const blob=await response.blob();
     if(!blob.size||blob.size>98304)throw Error('Imagen incompleta');
-    if(frame&&frame===previewFrame){if(Date.now()-previewGoodAt>3000)previewMessage('Esperando una imagen nueva…');return}
-    image=await decodePreview(blob,controller.signal);
+    if(frame&&frame===previewReceivedFrame){if(Date.now()-previewGoodAt>3000)previewMessage('Esperando una imagen nueva…');return}
     if(controller.signal.aborted||epoch!==previewEpoch||!pageActive||document.hidden)return;
-    if((image.naturalWidth||image.width)!==320||(image.naturalHeight||image.height)!==240)throw Error('Dimensiones de imagen inválidas');
-    // No borrar ni redimensionar el canvas: la última imagen permanece
-    // visible hasta que otra se haya recibido y decodificado por completo.
-    previewContext.drawImage(image,0,0,320,240);
-    previewFrame=frame;previewGoodAt=Date.now();previewMessage('');
-    if(!previewRateAt)previewRateAt=previewGoodAt;
-    ++previewRateFrames;
-    if(previewGoodAt-previewRateAt>=1000){previewFps=previewRateFrames*1000/(previewGoodAt-previewRateAt);previewRateAt=previewGoodAt;previewRateFrames=0}
+    previewReceivedFrame=frame;pendingPreview={blob,frame,epoch};paintPreview();
   }catch(error){
     if(epoch===previewEpoch&&pageActive&&!document.hidden)previewMessage(previewGoodAt?'Reconectando vídeo · última imagen conservada':'Conectando con la cámara…');
     delay=250;
   }finally{
-    if(image&&typeof image.close==='function')image.close();
     clearTimeout(timeout);previewController=null;previewRunning=false;
     schedulePreview(Math.max(0,delay-(Date.now()-started)));
   }
@@ -137,8 +160,8 @@ async function poll(){
     const r=$('roi');r.style.left=s.options.x+'%';r.style.top=s.options.y+'%';r.style.width=s.options.width+'%';r.style.height=s.options.height+'%';
     if(s.streamPort&&s.videoFrame){
       const url=new URL(location.href);url.port=s.streamPort;url.pathname='/frame';url.search='';url.hash='';
-      if(previewUrl!==url.href){stopPreview();previewUrl=url.href;previewFrame=0}
-      previewInterval=Math.max(67,Number(s.previewIntervalMs)||67);previewEnabled=true;startPreview();
+      if(previewUrl!==url.href){stopPreview();previewUrl=url.href;previewFrame=0;previewReceivedFrame=0}
+      previewInterval=Math.max(33,Number(s.previewIntervalMs)||33);previewEnabled=true;startPreview();
     }
   }catch(error){offline=true;$('result').textContent='Reintentando el estado de la placa';$('result').className='status muted';$('notice').textContent=error.message;setBusy(true)}
   setTimeout(poll,offline?2000:500);

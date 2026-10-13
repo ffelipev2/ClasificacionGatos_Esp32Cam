@@ -711,20 +711,44 @@ esp_err_t frameHandler(httpd_req_t *req) {
   httpd_resp_set_hdr(req, "Cache-Control", "no-store");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
   httpd_resp_set_hdr(req, "Access-Control-Expose-Headers", "X-Frame-Number");
+  uint32_t after = 0;
+  char query[64] = {}, numberText[16] = {};
+  if (httpd_req_get_url_query_len(req)) {
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+      httpd_resp_set_status(req, "400 Bad Request");
+      return httpd_resp_send(req, "Consulta demasiado larga.", HTTPD_RESP_USE_STRLEN);
+    }
+    if (httpd_query_key_value(query, "after", numberText, sizeof(numberText)) == ESP_OK) {
+      char *end;
+      const unsigned long value = strtoul(numberText, &end, 10);
+      if (numberText[0] && !*end) after = uint32_t(value);
+    }
+  }
   size_t bytes;
   uint32_t frame;
-  xSemaphoreTake(sharedMutex, portMAX_DELAY);
-  const int slot = previewPool.acquire(bytes, frame);
-  const bool recent = slot >= 0 && millis() - previewAt[slot] <= 2500;
-  xSemaphoreGive(sharedMutex);
-  if (!recent) {
+  int slot;
+  const uint32_t waitingAt = millis();
+  for (;;) {
+    xSemaphoreTake(sharedMutex, portMAX_DELAY);
+    slot = previewPool.acquire(bytes, frame);
+    const bool recent = slot >= 0 && millis() - previewAt[slot] <= 2500;
+    xSemaphoreGive(sharedMutex);
+    if (recent && (!after || frame != after)) break;
     if (slot >= 0) {
       xSemaphoreTake(sharedMutex, portMAX_DELAY);
       previewPool.release(slot);
       xSemaphoreGive(sharedMutex);
     }
-    httpd_resp_set_status(req, "503 Service Unavailable");
-    return httpd_resp_send(req, "Esperando una imagen reciente.", HTTPD_RESP_USE_STRLEN);
+    if (!recent) {
+      httpd_resp_set_status(req, "503 Service Unavailable");
+      return httpd_resp_send(req, "Esperando una imagen reciente.", HTTPD_RESP_USE_STRLEN);
+    }
+    if (millis() - waitingAt >= PREVIEW_NEW_FRAME_WAIT_MS) {
+      httpd_resp_set_status(req, "204 No Content");
+      return httpd_resp_send(req, nullptr, 0);
+    }
+    // Esperar una captura nueva sin retener un JPEG ni bloquear otros núcleos.
+    vTaskDelay(pdMS_TO_TICKS(2));
   }
   const int socket = httpd_req_to_sockfd(req);
   if (httpd_sess_set_send_override(req->handle, socket, boundedPhotoSend) != ESP_OK) {
@@ -1132,13 +1156,13 @@ void reconnectTestTask(void *) {
   vTaskDelete(nullptr);
 }
 
-// 'p': la misma ruta JPEG del panel, a 15 solicitudes/s y con keep-alive.
+// 'p': la misma ruta JPEG del panel, hasta 30 solicitudes/s y con keep-alive.
 // Comprobar imágenes completas, números nuevos y API durante un minuto.
 void previewTestTask(void *) {
   const Snapshot before = readSnapshot();
   WiFiClient client;
   client.setTimeout(1200);
-  uint32_t frames = 0, duplicates = 0, failures = 0, probes = 0, lastFrame = 0;
+  uint32_t frames = 0, duplicates = 0, failures = 0, probes = 0, lastFrame = 0, waiting = 0;
   const uint32_t started = millis();
   uint32_t lastProbe = started;
   uint8_t buffer[1024];
@@ -1147,10 +1171,12 @@ void previewTestTask(void *) {
     bool ok = client.connected() || client.connect(IPAddress(127, 0, 0, 1), STREAM_PORT, 1200);
     size_t bytes = 0;
     uint32_t frame = 0;
-    bool cors = false;
+    bool cors = false, noContent = false;
     if (ok) {
-      client.print("GET /frame HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n");
-      ok = client.readStringUntil('\n').indexOf("200") >= 0;
+      client.printf("GET /frame?after=%lu HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n", static_cast<unsigned long>(lastFrame));
+      const String first = client.readStringUntil('\n');
+      noContent = first.indexOf("204") >= 0;
+      ok = first.indexOf("200") >= 0 || noContent;
       while (ok) {
         const String line = client.readStringUntil('\n');
         if (line == "\r") break;
@@ -1160,7 +1186,7 @@ void previewTestTask(void *) {
         if (line.startsWith("Access-Control-Expose-Headers: X-Frame-Number")) cors = true;
       }
     }
-    ok = ok && bytes >= 4 && bytes <= MAX_JPEG_BYTES && frame && cors;
+    ok = ok && cors && (noContent || (bytes >= 4 && bytes <= MAX_JPEG_BYTES && frame));
     size_t received = 0;
     uint8_t first[2] = {}, tail[2] = {};
     while (ok && received < bytes && millis() - requestAt < 1500) {
@@ -1173,9 +1199,10 @@ void previewTestTask(void *) {
       }
       if (!n) vTaskDelay(pdMS_TO_TICKS(1));
     }
-    ok = ok && received == bytes && first[0] == 0xff && first[1] == 0xd8 &&
-      tail[0] == 0xff && tail[1] == 0xd9;
-    if (ok) {
+    ok = ok && (noContent || (received == bytes && first[0] == 0xff && first[1] == 0xd8 &&
+      tail[0] == 0xff && tail[1] == 0xd9));
+    if (ok && noContent) ++waiting;
+    else if (ok) {
       ++frames;
       if (frame == lastFrame) ++duplicates;
       lastFrame = frame;
@@ -1197,10 +1224,10 @@ void previewTestTask(void *) {
   client.stop();
   const Snapshot after = readSnapshot();
   const bool preserved = before.background == after.background && before.orange == after.orange && before.gray == after.gray;
-  Serial.printf("PREVIEWTEST frames=%lu,fps=%.1f,duplicates=%lu,failures=%lu,api=%lu,recognition=%.1f,cameraErrors=%lu,calibration=%u,bg=%u,orange=%u,gray=%u\n",
+  Serial.printf("PREVIEWTEST frames=%lu,fps=%.1f,duplicates=%lu,waiting=%lu,failures=%lu,api=%lu,recognition=%.1f,capture=%.1f,cameraErrors=%lu,calibration=%u,bg=%u,orange=%u,gray=%u\n",
     static_cast<unsigned long>(frames), frames * 1000.0f / (millis() - started),
-    static_cast<unsigned long>(duplicates), static_cast<unsigned long>(failures),
-    static_cast<unsigned long>(probes), after.fps, static_cast<unsigned long>(after.errors - before.errors),
+    static_cast<unsigned long>(duplicates), static_cast<unsigned long>(waiting), static_cast<unsigned long>(failures),
+    static_cast<unsigned long>(probes), after.fps, after.videoFps, static_cast<unsigned long>(after.errors - before.errors),
     preserved, after.background, after.orange, after.gray);
   xSemaphoreTake(sharedMutex, portMAX_DELAY);
   testRunning = false;
